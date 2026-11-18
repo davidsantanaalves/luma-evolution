@@ -182,12 +182,14 @@ for (const [brand, [top, bottom]] of Object.entries(surfaces)) {
 }
 await generateVectorAssets();
 await generateFlagAssets();
-await sharp(path.join(source, 'app-icon.svg'))
-  .resize(80, 80)
-  .png()
-  .toFile(path.join(out, 'app-icon.png'));
-await sharp(path.join(source, 'app-icon.svg'))
-  .resize(130, 130)
-  .png()
-  .toFile(path.join(out, 'app-icon-large.png'));
+const appIcon = path.join(source, 'luma-evolution-app-icon.svg');
+for (const [file, size] of [
+  ['app-icon.png', 80],
+  ['app-icon-large.png', 130],
+]) {
+  await sharp(appIcon)
+    .resize(size, size, { fit: 'contain', background: '#00000000' })
+    .png()
+    .toFile(path.join(out, file));
+}
 console.log(`Native artwork ready: ${path.relative(root, out)}`);

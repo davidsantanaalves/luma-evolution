@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1254 1254" width="1254" height="1254" role="img" aria-labelledby="title desc">
+  <title id="title">Luma Evolution — app icon</title>
+  <desc id="desc">L azul-ciano com dobra de fita e Evo em lettering geométrico, circundado por duas órbitas fluidas.</desc>
+  <defs>
+    <linearGradient id="stem" gradientUnits="userSpaceOnUse" x1="420" y1="215" x2="170" y2="929">
+      <stop offset="0" stop-color="#d8fcff"/>
+      <stop offset=".26" stop-color="#8ce5f6"/>
+      <stop offset=".50" stop-color="#58c9ef"/>
+      <stop offset=".77" stop-color="#5a9cf8"/>
+      <stop offset="1" stop-color="#6057ec"/>
+    </linearGradient>
+    <linearGradient id="base" gradientUnits="userSpaceOnUse" x1="184" y1="947" x2="989" y2="889">
+      <stop offset="0" stop-color="#9cfbea"/>
+      <stop offset=".35" stop-color="#40e7e9"/>
+      <stop offset=".65" stop-color="#27bff8"/>
+      <stop offset="1" stop-color="#7a5df0"/>
+    </linearGradient>
+    <linearGradient id="eText" gradientUnits="userSpaceOnUse" x1="608" y1="514" x2="732" y2="708">
+      <stop offset="0" stop-color="#65f9f0"/>
+      <stop offset=".62" stop-color="#33c5f1"/>
+      <stop offset="1" stop-color="#189fe9"/>
+    </linearGradient>
+    <linearGradient id="vText" gradientUnits="userSpaceOnUse" x1="758" y1="535" x2="896" y2="721">
+      <stop offset="0" stop-color="#58d6f4"/>
+      <stop offset=".62" stop-color="#248ef0"/>
+      <stop offset="1" stop-color="#188be8"/>
+    </linearGradient>
+    <linearGradient id="oText" gradientUnits="userSpaceOnUse" x1="904" y1="537" x2="1084" y2="697">
+      <stop offset="0" stop-color="#5ca6fe"/>
+      <stop offset=".5" stop-color="#536bfa"/>
+      <stop offset="1" stop-color="#7955ec"/>
+    </linearGradient>
+    <linearGradient id="swoosh-top" gradientUnits="userSpaceOnUse" x1="785" y1="480" x2="1123" y2="517">
+      <stop offset="0" stop-color="#64f6ee"/>
+      <stop offset=".47" stop-color="#5cbbfa"/>
+      <stop offset="1" stop-color="#8150ed"/>
+    </linearGradient>
+    <linearGradient id="swoosh-bottom" gradientUnits="userSpaceOnUse" x1="517" y1="702" x2="920" y2="707">
+      <stop offset="0" stop-color="#67f9e5"/>
+      <stop offset=".45" stop-color="#39e5df"/>
+      <stop offset="1" stop-color="#25bde8"/>
+    </linearGradient>
+    <clipPath id="clip-l">
+      <path d="M 429 251 L 413 263 L 396 281 L 386 295 L 369 328 L 338 405 L 335 416 L 309 477 L 304 493 L 248 628 L 188 779 L 180 804 L 172 840 L 170 875 L 173 901 L 178 921 L 186 941 L 194 955 L 206 971 L 221 986 L 242 1001 L 272 1015 L 306 1023 L 875 1024 L 896 1017 L 908 1005 L 989 837 L 511 837 L 498 836 L 478 829 L 468 822 L 455 807 L 449 794 L 447 779 L 448 766 L 451 756 L 673 235 L 474 235 L 444 243 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- All emblem shapes are native SVG paths, not raster images. -->
+  <g id="logo" stroke="none">
+    <g id="capital-L">
+      <path id="L-body" d="M 429 251 L 413 263 L 396 281 L 386 295 L 369 328 L 338 405 L 335 416 L 309 477 L 304 493 L 248 628 L 188 779 L 180 804 L 172 840 L 170 875 L 173 901 L 178 921 L 186 941 L 194 955 L 206 971 L 221 986 L 242 1001 L 272 1015 L 306 1023 L 875 1024 L 896 1017 L 908 1005 L 989 837 L 511 837 L 498 836 L 478 829 L 468 822 L 455 807 L 449 794 L 447 779 L 448 766 L 451 756 L 673 235 L 474 235 L 444 243 Z" fill="url(#stem)"/>
+      <path id="L-fold" d="M 155 950 L 428 788 C 440 781 449 768 447 788 C 440 823 453 834 490 835 L 1024 835 L 1024 1070 L 120 1070 Z" fill="url(#base)" clip-path="url(#clip-l)"/>
+    </g>
+    <g id="evolution-orbits">
+      <path id="orbit-over" d="M 1124 504 L 1124 484 L 1119 468 L 1107 452 L 1091 440 L 1079 434 L 1065 429 L 1039 424 L 985 425 L 952 430 L 918 438 L 872 452 L 841 464 L 784 492 L 857 467 L 919 453 L 953 449 L 991 449 L 1025 455 L 1048 464 L 1062 473 L 1076 487 L 1086 505 L 1091 528 L 1090 546 L 1082 574 L 1077 584 L 1090 570 L 1110 541 L 1120 520 Z" fill="url(#swoosh-top)"/>
+      <path id="orbit-under" d="M 516 714 L 518 725 L 527 740 L 534 747 L 553 758 L 566 763 L 595 769 L 655 771 L 708 766 L 780 751 L 837 733 L 871 720 L 920 697 L 841 722 L 800 732 L 762 739 L 687 745 L 653 744 L 621 740 L 592 732 L 569 719 L 554 702 L 549 689 L 549 673 L 554 655 L 567 633 L 547 651 L 530 672 L 520 691 L 517 701 Z" fill="url(#swoosh-bottom)"/>
+    </g>
+    <g id="Evo-lettering">
+      <path id="letter-E" d="M 764 505 L 662 505 L 648 508 L 634 516 L 622 530 L 617 541 L 579 679 L 580 686 L 585 689 L 730 689 L 734 687 L 737 682 L 743 658 L 743 654 L 741 652 L 636 652 L 634 650 L 645 614 L 733 614 L 739 609 L 747 581 L 746 578 L 663 578 L 656 577 L 655 574 L 662 549 L 670 542 L 755 541 L 758 538 L 766 507 Z" fill="url(#eText)"/>
+      <path id="letter-v" d="M 923 547 L 882 548 L 871 563 L 820 648 L 817 639 L 805 549 L 803 547 L 765 547 L 763 549 L 762 554 L 782 683 L 785 688 L 834 689 L 842 684 L 855 660 L 922 551 Z" fill="url(#vText)"/>
+      <path id="letter-o" d="M 1041 557 L 1027 549 L 1018 546 L 1006 544 L 983 544 L 958 550 L 933 564 L 913 585 L 904 601 L 900 613 L 897 628 L 897 644 L 901 659 L 906 668 L 921 682 L 937 689 L 952 692 L 977 692 L 992 689 L 1015 679 L 1027 671 L 1041 657 L 1053 638 L 1061 609 L 1061 596 L 1057 577 L 1051 567 Z M 1003 582 L 1011 590 L 1015 600 L 1014 618 L 1006 636 L 993 649 L 978 656 L 961 656 L 951 651 L 944 641 L 942 627 L 946 610 L 955 595 L 965 586 L 978 580 L 995 579 Z" fill="url(#oText)" fill-rule="evenodd"/>
+    </g>
+  </g>
+</svg>

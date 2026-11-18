@@ -1,7 +1,10 @@
 # Luma assets and references
 
 - `assets/mark.svg`, `assets/app-icon.svg`, and the Midnight/Slate/Prism SVG wallpapers:
-  original Luma artwork, MIT. webOS supplies the app icon panel using `iconColor`.
+  original Luma artwork, MIT.
+- `assets/luma-evolution-app-icon.svg` is the official app icon source. `pnpm assets` rasterizes
+  it to transparent 80 × 80 and 130 × 130 PNGs for webOS. The launcher supplies the panel color
+  from `iconColor` in `appinfo.json`.
 - `assets/wallpapers/dunes.jpg`: Unsplash photo `1509316785289-025f5b846b35`,
   https://images.unsplash.com/photo-1509316785289-025f5b846b35, [Unsplash License](https://unsplash.com/license).
 - `assets/wallpapers/san-francisco.jpg`: Unsplash photo `1501594907352-04cda38ebc29`,
