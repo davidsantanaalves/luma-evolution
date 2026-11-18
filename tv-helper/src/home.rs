@@ -6,11 +6,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs, path::Path};
 
-const STATE: &str = "/var/lib/luma-home";
-const CONFIG: &str = "/var/lib/luma-home/state.json";
-const STAGE: &str = "/var/lib/luma-home/app";
-const HOOK: &str = "/var/lib/webosbrew/init.d/64-luma-home";
-const MARKER: &str = "/var/run/luma-home";
+pub const TAKEOVER_ENABLED: bool = false;
+const STATE: &str = "/var/lib/luma-evolution-home";
+pub(crate) const CONFIG: &str = "/var/lib/luma-evolution-home/state.json";
+pub(crate) const STAGE: &str = "/var/lib/luma-evolution-home/app";
+const HOOK: &str = "/var/lib/webosbrew/init.d/64-luma-evolution-home";
+const MARKER: &str = "/var/run/luma-evolution-home";
 pub const HOME: &str = "com.webos.app.home";
 pub const FULL_HOME: &str = "com.webos.app.fullhome";
 fn default_home() -> String {
@@ -457,12 +458,21 @@ impl<'a, S: System> Home<'a, S> {
         }
         self.owned_mount()?;
         if self.exists(HOOK) && !hook_owned(self.system) {
-            return Err("64-luma-home is already in use".into());
+            return Err("64-luma-evolution-home is already in use".into());
         }
-        if self.exists("/var/lib/webosbrew/init.d/65-luma") {
+        if self.exists("/var/lib/webosbrew/init.d/65-luma-evolution") {
             return Err(
                 "Disable the standalone cold-boot hook with autostart.sh disable first".into(),
             );
+        }
+        if [
+            "/var/lib/webosbrew/init.d/64-luma-home",
+            "/var/lib/webosbrew/init.d/65-luma",
+        ]
+        .iter()
+        .any(|hook| self.exists(hook))
+        {
+            return Err("A Luma or Luma+ boot hook is already present".into());
         }
         if stock["id"] != self.id || stock["main"] == "luma" {
             return Err("Could not identify the original LG Home manifest".into());
@@ -510,7 +520,7 @@ impl<'a, S: System> Home<'a, S> {
             system::write_json(self.system, format!("{STAGE}/appinfo.json"), &manifest)?;
             system::write(
                 self.system,
-                format!("{STAGE}/.luma-home"),
+                format!("{STAGE}/.luma-evolution-home"),
                 format!("{APP}\n").as_bytes(),
                 0o644,
             )?;
@@ -542,9 +552,13 @@ fn unescape(s: &str) -> String {
         .replace("\\134", "\\")
 }
 pub fn exe_owned(root: &str) -> bool {
-    root.strip_suffix("//deleted")
-        .unwrap_or(root)
-        .ends_with("/com.eluz1ve.lumaplus/luma")
+    let root = root.strip_suffix("//deleted").unwrap_or(root);
+    let path = Path::new(root);
+    path.file_name().is_some_and(|name| name == "luma")
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|id| id == APP)
 }
 pub fn home_process(
     args: &[String],
@@ -593,7 +607,7 @@ pub fn method<'a>(release: &str, stock: &Value, id: &str) -> Result<&'a str> {
 }
 pub fn hook_owned(system: &impl System) -> bool {
     fs::read_link(system.path(Path::new(HOOK)))
-        .is_ok_and(|p| p == system.path(Path::new("/var/lib/luma-home/home.sh")))
+        .is_ok_and(|p| p == system.path(Path::new("/var/lib/luma-evolution-home/home.sh")))
 }
 pub fn load(system: &impl System) -> Result<Option<Config>> {
     if !system::exists(system, CONFIG) {
@@ -605,6 +619,18 @@ pub fn load(system: &impl System) -> Result<Option<Config>> {
     Ok(Some(config))
 }
 pub fn dispatch(
+    system: &impl System,
+    command: &str,
+    app: Option<&str>,
+    selected: Option<&str>,
+) -> Result<Value> {
+    if !TAKEOVER_ENABLED && command != "status" {
+        return Err("Luma Evolution Home takeover is disabled".into());
+    }
+    dispatch_integration(system, command, app, selected)
+}
+
+pub(crate) fn dispatch_integration(
     system: &impl System,
     command: &str,
     app: Option<&str>,
@@ -712,9 +738,9 @@ fn restore_auto_launch(system: &impl System, config: &mut Config) -> Result<()> 
 }
 
 /// Luma's heartbeat as Home: its PID, rewritten every few seconds by its main loop.
-pub const BEAT: &str = "/tmp/luma-home.alive";
+pub const BEAT: &str = "/tmp/luma-evolution-home.alive";
 /// Why LG Home came back, for Luma's next start.
-pub const FALLBACK: &str = "/var/run/luma-home-fallback";
+pub const FALLBACK: &str = "/var/run/luma-evolution-home-fallback";
 /// A heartbeat this old, while Luma is in front of a screen that is on, means it hangs.
 const HUNG_AFTER: u64 = 30;
 /// This many new Luma processes within `CRASH_WINDOW` mean it keeps crashing.
@@ -756,7 +782,7 @@ impl Watch {
 
 /// `home watch`: while Luma is Home, gives LG Home back for this session when Luma hangs or
 /// keeps crashing. The next boot applies Luma again. One watchdog runs at a time.
-pub fn watch(system: &impl System) -> Result<Value> {
+fn watch(system: &impl System) -> Result<Value> {
     system::root(system)?;
     let lock = fs::OpenOptions::new()
         .create(true)
@@ -768,7 +794,7 @@ pub fn watch(system: &impl System) -> Result<Value> {
         return Ok(json!({"returnValue":true,"running":true}));
     }
     eprintln!("Luma Home watchdog: watching");
-    // The boot hook runs the copy under /var/lib/luma-home: an updated Luma refreshes it, and
+    // The boot hook runs the copy under /var/lib/luma-evolution-home: an updated Luma refreshes it, and
     // LG's auto launch is settled now rather than first at the next cold start.
     if let Some(mut config) = load(system)?.filter(|config| config.enabled) {
         let home = Home::new(system, &config.home_id)?;

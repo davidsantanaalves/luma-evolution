@@ -10,17 +10,21 @@ const source = await fs.readFile(new URL('../tv/home.sh', import.meta.url), 'utf
 // tv/home.sh in a temporary root: the copied state directory with a recording luma-helper,
 // the cold-boot hook as a real symlink, and stubs for the root-only id/stat checks.
 async function fixture({ helper = true, relative = false } = {}) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'luma-home-wrapper-'));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'luma-evolution-home-wrapper-'));
   const state = path.join(root, 'state');
   const bin = path.join(root, 'bin');
   const hooks = path.join(root, 'init.d');
   const calls = path.join(root, 'calls');
   await Promise.all([state, bin, hooks].map((dir) => fs.mkdir(dir)));
-  const line = 'STATE=/var/lib/luma-home\n';
+  const line = 'STATE=/var/lib/luma-evolution-home\n';
   assert.ok(source.includes(line));
-  await fs.writeFile(path.join(state, 'home.sh'), source.replace(line, `STATE='${state}'\n`), {
-    mode: 0o755,
-  });
+  await fs.writeFile(
+    path.join(state, 'home.sh'),
+    source
+      .replace(line, `STATE='${state}'\n`)
+      .replace('TAKEOVER_ENABLED=false', 'TAKEOVER_ENABLED=true'),
+    { mode: 0o755 },
+  );
   if (helper) {
     await fs.writeFile(
       path.join(state, 'luma-helper'),
@@ -35,7 +39,7 @@ async function fixture({ helper = true, relative = false } = {}) {
   ]) {
     await fs.writeFile(path.join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
   }
-  const hook = path.join(hooks, '64-luma-home');
+  const hook = path.join(hooks, '64-luma-evolution-home');
   await fs.symlink(relative ? '../state/home.sh' : path.join(state, 'home.sh'), hook);
   const run = (...args) =>
     spawnSync('/bin/sh', [hook, ...args], {
@@ -87,5 +91,64 @@ test('a missing helper is reported before any change', async () => {
     assert.match(status.stderr, /native Luma TV helper is missing/);
   } finally {
     await fs.rm(tv.root, { recursive: true, force: true });
+  }
+});
+
+test('foundation builds refuse all takeover operations before executing commands', () => {
+  const shell = process.platform === 'win32' ? 'bash' : '/bin/sh';
+  for (const command of [
+    [],
+    ['boot'],
+    ['enable'],
+    ['apply'],
+    ['disable'],
+    ['restore'],
+    ['watch'],
+  ]) {
+    const result = spawnSync(shell, ['-s', '--', ...command], {
+      input: source,
+      encoding: 'utf8',
+      env: { ...process.env, TAKEOVER_ENABLED: 'true' },
+      timeout: 10000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Home takeover is disabled/);
+  }
+});
+
+test('standalone autostart manages only its own hook', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'luma-evolution-autostart-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const app = path.join(root, 'app');
+  const hooks = path.join(root, 'init.d');
+  const bin = path.join(root, 'bin');
+  await Promise.all([app, hooks, bin].map((directory) => fs.mkdir(directory)));
+  const hook = path.join(hooks, '65-luma-evolution');
+  const legacy = path.join(hooks, '65-luma');
+  const autostart = path.join(app, 'autostart.sh');
+  const script = (await fs.readFile(new URL('../tv/autostart.sh', import.meta.url), 'utf8'))
+    .replace(/^APP_DIR=.*$/m, `APP_DIR='${app}'`)
+    .replace(/^HOOK=.*$/m, `HOOK='${hook}'`)
+    .replaceAll('/var/lib/webosbrew/init.d', hooks);
+  await Promise.all([
+    fs.writeFile(legacy, 'upstream hook'),
+    fs.writeFile(path.join(app, 'appinfo.json'), '{}'),
+    fs.writeFile(path.join(bin, 'id'), '#!/bin/sh\necho 0\n', { mode: 0o755 }),
+    fs.writeFile(autostart, script),
+  ]);
+  for (const argument of ['enable', 'disable']) {
+    const result = spawnSync('/bin/sh', [autostart, argument], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      encoding: 'utf8',
+      timeout: 10000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    if (argument === 'enable') {
+      assert.equal(await fs.readlink(hook), autostart);
+    } else {
+      await assert.rejects(fs.lstat(hook), { code: 'ENOENT' });
+    }
+    assert.equal(await fs.readFile(legacy, 'utf8'), 'upstream hook');
   }
 });

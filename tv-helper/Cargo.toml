@@ -15,6 +15,7 @@ default = []
 webos = ["dep:libc"]
 
 [dependencies]
+flate2 = "1"
 libc = { version = "0.2", optional = true }
 ring = "0.17"
 serde = { version = "1", features = ["derive"] }

@@ -513,7 +513,7 @@ impl State {
             error: None,
             available_update: None,
             update_changes: Vec::new(),
-            update_status: crate::update::Status::Unchecked,
+            update_status: crate::update::Status::default(),
             update_check_requested: false,
             inventory_failures: 0,
             dirty: true,
@@ -3627,7 +3627,8 @@ impl State {
                 }
             }
             Target::InstallUpdate => {
-                if !self.update_busy()
+                if self.update_status != crate::update::Status::Disabled
+                    && !self.update_busy()
                     && let Some(version) = &self.available_update
                 {
                     let version = version.clone();
@@ -3636,7 +3637,7 @@ impl State {
                 }
             }
             Target::CheckUpdates => {
-                if !self.update_busy() {
+                if self.update_status != crate::update::Status::Disabled && !self.update_busy() {
                     self.update = crate::update::InstallStatus::Idle;
                     self.update_status = crate::update::Status::Checking;
                     self.update_check_requested = true;
@@ -3742,6 +3743,9 @@ impl State {
                         return vec![];
                     }
                     HOME_TAKEOVER_ROW => {
+                        if !luma_tv_helper::home::TAKEOVER_ENABLED {
+                            return vec![];
+                        }
                         self.subpage = Some(Subpage::HomeTakeover);
                         self.focus = Target::Choice(if self.home_takeover { 0 } else { 1 });
                         self.scroll = 0.;
@@ -3881,7 +3885,9 @@ impl State {
                     Some(Subpage::HomeTakeover) => {
                         let enable = index == 0;
                         self.close_subpage();
-                        return if enable == self.home_takeover {
+                        return if !luma_tv_helper::home::TAKEOVER_ENABLED
+                            || enable == self.home_takeover
+                        {
                             vec![]
                         } else {
                             vec![Effect::HomeTakeover(enable)]

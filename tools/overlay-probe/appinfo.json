@@ -1,10 +1,10 @@
 {
-  "id": "com.eluz1ve.lumaplus.overlayprobe",
+  "id": "com.davidsantana.lumaevolution.overlayprobe",
   "version": "0.0.1",
-  "vendor": "Luma",
+  "vendor": "Luma Evolution",
   "type": "qml",
   "main": "main.qml",
-  "title": "Luma Overlay Probe",
+  "title": "Luma Evolution Overlay Probe",
   "icon": "icon.png",
   "noSplashOnLaunch": true,
   "requiredACG": [],

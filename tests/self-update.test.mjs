@@ -14,6 +14,7 @@ function run({
   recover = true,
   launch = true,
   checksum = true,
+  identity = true,
   method = 'executable',
   homeId = 'com.webos.app.home',
   pretty = false,
@@ -38,14 +39,14 @@ function run({
     write(`${dir}/${name}/package.ipk`, 'test package');
     return `${dir}/${name}`;
   };
-  download(`luma-update-${attempt}`);
+  download(`luma-evolution-update-${attempt}`);
   fixtures({ dir, download });
   // tools/package.mjs and the native helper pretty-print; the saved stock manifest has its own
   // "version" and "id", which must not be mistaken for Luma's version or the Home target.
   const json = (value) => (pretty ? `${JSON.stringify(value, null, 2)}\n` : JSON.stringify(value));
   write(
     `${app}/appinfo.json`,
-    json({ id: 'com.eluz1ve.lumaplus', version: '9.0.0', type: 'native' }),
+    json({ id: 'com.davidsantana.lumaevolution', version: '9.0.0', type: 'native' }),
   );
   write(
     `${homeState}/state.json`,
@@ -69,16 +70,25 @@ esac
   );
   write(`${app}/home.sh`, `#!/bin/sh\necho refresh >> '${dir}/calls'\nexit ${reapply ? 0 : 1}\n`);
   write(
+    `${app}/luma-helper`,
+    `#!/bin/sh
+[ "$1" = verify-self-update-ipk ] && [ "$3" = 9.0.0 ] &&
+  [ "${'$'}{2##*/}" = com.davidsantana.lumaevolution_9.0.0_arm.ipk ] || exit 2
+exit ${identity ? 0 : 1}
+`,
+  );
+  write(
     `${homeState}/home.sh`,
     `#!/bin/sh\necho restore >> '${dir}/calls'\nexit ${recover ? 0 : 1}\n`,
   );
   const script = source
-    .replaceAll('/var/lib/luma-update', state)
-    .replaceAll('/var/lib/luma-home', homeState)
-    .replaceAll('/media/developer/apps/usr/palm/applications/com.eluz1ve.lumaplus', app)
+    .replace('SELF_UPDATE_ENABLED=false', 'SELF_UPDATE_ENABLED=true')
+    .replaceAll('/var/lib/luma-evolution-update', state)
+    .replaceAll('/var/lib/luma-evolution-home', homeState)
+    .replaceAll('/media/developer/apps/usr/palm/applications/com.davidsantana.lumaevolution', app)
     .replaceAll('/proc/mounts', `${dir}/mounts`)
-    .replaceAll('/var/run/luma-home', `${dir}/marker`)
-    .replaceAll('/tmp/luma-update-', `${dir}/luma-update-`)
+    .replaceAll('/var/run/luma-evolution-home', `${dir}/marker`)
+    .replaceAll('/tmp/luma-evolution-update-', `${dir}/luma-evolution-update-`)
     .replaceAll('find /tmp ', `find ${dir} `);
   write(`${dir}/installer.sh`, script);
   const sha = checksum ? createHash('sha256').update('test package').digest('hex') : '0'.repeat(64);
@@ -87,7 +97,7 @@ esac
       '/bin/sh',
       [
         `${dir}/installer.sh`,
-        `${dir}/luma-update-${attempt}/package.ipk`,
+        `${dir}/luma-evolution-update-${attempt}/package.ipk`,
         sha,
         '9.0.0',
         app,
@@ -102,7 +112,7 @@ esac
     assert.equal(result.signal, null, result.stderr);
     const calls = fs.existsSync(`${dir}/calls`) ? fs.readFileSync(`${dir}/calls`, 'utf8') : '';
     const resultFile = `${state}/result.${attempt}.json`;
-    const downloads = fs.readdirSync(dir).filter((name) => name.startsWith('luma-update-'));
+    const downloads = fs.readdirSync(dir).filter((name) => /^luma-(evolution-)?update-/.test(name));
     if (!fs.existsSync(resultFile)) return { status: null, calls, exit: result.status, downloads };
     const status = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
     assert.deepEqual(status, JSON.parse(fs.readFileSync(`${state}/result.json`, 'utf8')));
@@ -117,7 +127,8 @@ test('normal app update verifies the package and reports completion after launch
   const result = run();
   assert.equal(result.exit, 0);
   assert.equal(result.status.state, 'success');
-  assert.match(result.calls, /launch.*com.eluz1ve.lumaplus/);
+  assert.match(result.calls, /dev\/install.*com\.davidsantana\.lumaevolution_9\.0\.0_arm\.ipk/);
+  assert.match(result.calls, /launch.*com.davidsantana.lumaevolution/);
 });
 test('checksum and install failures publish retryable failure, never launch', () => {
   for (const options of [{ checksum: false }, { install: false }]) {
@@ -126,6 +137,25 @@ test('checksum and install failures publish retryable failure, never launch', ()
     assert.equal(result.status.state, 'failed');
     assert.doesNotMatch(result.calls, /launch/);
   }
+});
+test('a package for a different app is refused before calling the installer', () => {
+  const result = run({ identity: false });
+  assert.equal(result.exit, 1);
+  assert.match(result.status.message, /identity or contents mismatch/);
+  assert.doesNotMatch(result.calls, /dev\/install|launch/);
+});
+
+test('the shipped self-update installer exits before reading arguments or running commands', () => {
+  const shell = process.platform === 'win32' ? 'bash' : '/bin/sh';
+  const result = spawnSync(shell, ['-s'], {
+    input: source,
+    encoding: 'utf8',
+    env: { ...process.env, SELF_UPDATE_ENABLED: 'true' },
+    timeout: 10000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /self-update installation is disabled/);
 });
 test('both Home methods refresh from the new package and fail visibly when reapply fails', () => {
   for (const method of ['executable', 'manifest']) {
@@ -143,7 +173,7 @@ test('both Home methods refresh from the new package and fail visibly when reapp
   }
 });
 test('a state directory left with the default mode is made private, not a silent stop', () => {
-  // luma-helper's app updates create /var/lib/luma-update/apps, and with it this directory.
+  // luma-helper's app updates create /var/lib/luma-evolution-update/apps, and with it this directory.
   const result = run({ stateMode: 0o755 });
   assert.equal(result.exit, 0);
   assert.equal(result.status?.state, 'success');
@@ -163,17 +193,19 @@ test('the downloaded package does not outlive its verified copy', () => {
 });
 test('a package that failed its checksum stays for Luma to report and remove', () => {
   const result = run({ checksum: false });
-  assert.deepEqual(result.downloads, [`luma-update-${'a'.repeat(32)}`]);
+  assert.deepEqual(result.downloads, [`luma-evolution-update-${'a'.repeat(32)}`]);
 });
 test('only abandoned download directories are swept', () => {
   const hours = new Date(Date.now() - 2 * 3600 * 1000);
-  const recent = `luma-update-${'c'.repeat(32)}`;
-  const link = `luma-update-${'d'.repeat(32)}`;
+  const recent = `luma-evolution-update-${'c'.repeat(32)}`;
+  const link = `luma-evolution-update-${'d'.repeat(32)}`;
+  const legacy = `luma-update-${'e'.repeat(32)}`;
   let kept;
   const result = run({
     fixtures: ({ dir, download }) => {
-      fs.utimesSync(download(`luma-update-${'b'.repeat(32)}`), hours, hours);
-      fs.utimesSync(download('luma-update-notours'), hours, hours);
+      fs.utimesSync(download(`luma-evolution-update-${'b'.repeat(32)}`), hours, hours);
+      fs.utimesSync(download('luma-evolution-update-notours'), hours, hours);
+      fs.utimesSync(download(legacy), hours, hours);
       download(recent);
       kept = `${dir}/target/package.ipk`;
       fs.mkdirSync(`${dir}/target`);
@@ -183,7 +215,10 @@ test('only abandoned download directories are swept', () => {
     },
   });
   assert.equal(result.status.state, 'success');
-  assert.deepEqual(result.downloads.sort(), [recent, link, 'luma-update-notours'].sort());
+  assert.deepEqual(
+    result.downloads.sort(),
+    [recent, link, legacy, 'luma-evolution-update-notours'].sort(),
+  );
 });
 test('a rejected launch is not reported as a successful update', () => {
   assert.equal(run({ launch: false }).status.state, 'failed');

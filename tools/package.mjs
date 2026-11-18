@@ -3,7 +3,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { prepareWebosRuntime, verifyWebosSdl } from './webos-runtime.mjs';
-import { normalizeAndVerifyPackage } from './ipk.mjs';
+import { normalizeAndVerifyPackage, packagedScripts, verifyPosixScript } from './ipk.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
 const highResolution = process.argv.includes('--4k');
@@ -11,12 +11,12 @@ const manifest = JSON.parse(await fs.readFile(path.join(root, 'appinfo.json'), '
 const project = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
 if (
   project.version !== manifest.version ||
-  manifest.id !== 'com.eluz1ve.lumaplus' ||
+  manifest.id !== 'com.davidsantana.lumaevolution' ||
   manifest.type !== 'native' ||
   manifest.main !== 'luma'
 ) {
   throw new Error(
-    'Native package metadata must use com.eluz1ve.lumaplus, main luma, and synchronized versions.',
+    'Native package metadata must use com.davidsantana.lumaevolution, main luma, and synchronized versions.',
   );
 }
 const binary = path.join(root, 'target/armv7-unknown-linux-gnueabi/release/luma');
@@ -142,22 +142,43 @@ await fs.cp(path.join(root, 'assets/licenses'), path.join(stage, 'licenses'), { 
 await fs.writeFile(path.join(stage, 'appinfo.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 const state = path.join(out, 'cli-state');
 await fs.mkdir(state, { recursive: true });
-const result = spawnSync(
-  process.execPath,
-  [
-    path.join(root, 'node_modules/@webos-tools/cli/bin/ares-package.js'),
-    '--no-minify',
-    '--outdir',
-    dist,
-    stage,
-  ],
-  { cwd: root, env: { ...process.env, APPDATA: state }, stdio: 'inherit', timeout: 120000 },
-);
-if (result.error) throw result.error;
-if (result.status !== 0) process.exit(result.status ?? 1);
+const scripts = new Map();
+for (const name of packagedScripts) {
+  const script = await fs.readFile(path.join(stage, name));
+  verifyPosixScript(script, name);
+  const syntax = spawnSync('sh', ['-n'], { input: script, encoding: 'utf8', timeout: 5000 });
+  if (syntax.error) throw syntax.error;
+  if (syntax.status !== 0)
+    throw new Error(`Invalid shell syntax in ${name}: ${syntax.stderr.trim()}`);
+  scripts.set(name, script);
+}
 const filename = `${manifest.id}_${manifest.version}_arm.ipk`;
-const packaged = normalizeAndVerifyPackage(await fs.readFile(path.join(dist, filename)), manifest);
-await fs.writeFile(path.join(dist, filename), packaged);
-const hash = createHash('sha256').update(packaged).digest('hex');
-await fs.writeFile(path.join(dist, 'sha256sums'), `${hash}  ${filename}\n`);
-console.log(`Ready to install: dist/${filename}\nSHA-256: ${hash}`);
+const packageOutput = await fs.mkdtemp(path.join(out, 'ipk-output-'));
+try {
+  const result = spawnSync(
+    process.execPath,
+    [
+      path.join(root, 'node_modules/@webos-tools/cli/bin/ares-package.js'),
+      '--no-minify',
+      '--outdir',
+      packageOutput,
+      stage,
+    ],
+    { cwd: root, env: { ...process.env, APPDATA: state }, stdio: 'inherit', timeout: 120000 },
+  );
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error('ares-package failed.');
+  const packaged = normalizeAndVerifyPackage(
+    await fs.readFile(path.join(packageOutput, filename)),
+    manifest,
+    filename,
+    scripts,
+  );
+  const hash = createHash('sha256').update(packaged).digest('hex');
+  await fs.writeFile(path.join(packageOutput, filename), packaged);
+  await fs.rename(path.join(packageOutput, filename), path.join(dist, filename));
+  await fs.writeFile(path.join(dist, 'sha256sums'), `${hash}  ${filename}\n`);
+  console.log(`Ready to install: dist/${filename}\nSHA-256: ${hash}`);
+} finally {
+  await fs.rm(packageOutput, { recursive: true, force: true });
+}

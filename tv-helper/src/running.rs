@@ -1,5 +1,5 @@
 //! Running-card operations for the already-root Home, without a JS service startup.
-use crate::{ROOTS, Result, accepted, system::System, valid_app_id};
+use crate::{APP, OTHER_LUMA_APPS, ROOTS, Result, accepted, system::System, valid_app_id};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, fs, path::Path, sync::Mutex, time::Duration};
 
@@ -78,8 +78,12 @@ pub fn eligible(row: &Value) -> bool {
         && row["defaultWindowType"] == "card"
         && !matches!(
             id,
-            "com.webos.app.home" | "com.webos.app.livetv" | "com.eluz1ve.lumaplus" | "airplay"
+            APP | "com.webos.app.home"
+                | "com.webos.app.fullhome"
+                | "com.webos.app.livetv"
+                | "airplay"
         )
+        && !OTHER_LUMA_APPS.contains(&id)
         && !id.starts_with("com.webos.app.hdmi")
         && !id.starts_with("com.luma.")
         && row["processid"]

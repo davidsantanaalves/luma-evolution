@@ -33,6 +33,7 @@ fn the_repository_yields_only_packages_with_complete_safe_metadata() {
         package("e.large", "1.0.0", "https://example.com/e.ipk", SHA, 200 * 1024 * 1024),
         package("f.version", "1.0-beta", "https://example.com/f.ipk", SHA, 10),
         package("g.zip", "1.0.0", "https://example.com/g.zip", SHA, 10),
+        package("j.upstream", "1.0.0", "https://github.com/eluz1ve/lg-luma-plus/releases/download/v1/com.eluz1ve.lumaplus_1.0.0_arm.ipk", SHA, 10),
         {"id": "h.other", "manifest": {"id": "i.other"}},
     ]});
     let repo = parse_repo(&feed).unwrap();
@@ -45,11 +46,22 @@ fn the_repository_yields_only_packages_with_complete_safe_metadata() {
 }
 
 #[test]
+fn repeated_homebrew_entries_do_not_select_an_arbitrary_package() {
+    let repo = parse_repo(&json!({"packages": [
+        moonlight("1.6.37"), moonlight("1.6.38"), moonlight("1.6.39"),
+        package("other.app", "2.0.0", "https://example.com/other.ipk", SHA, 10),
+    ]}))
+    .unwrap();
+    assert_eq!(repo.keys().collect::<Vec<_>>(), ["other.app"]);
+}
+
+#[test]
 fn only_newer_versions_of_installed_homebrew_apps_are_due_never_luma_or_homebrew_channel() {
     let repo = parse_repo(&json!({"packages": [
         moonlight("1.6.37"),
         package("youtube.leanback.v4", "0.5.3", "https://example.com/y.ipk", SHA, 10),
         package("com.eluz1ve.lumaplus", "9.0.0", "https://example.com/l.ipk", SHA, 10),
+        package(crate::platform::APP_ID, "9.0.0", "https://example.com/e.ipk", SHA, 10),
         package("org.webosbrew.hbchannel", "9.0.0", "https://example.com/h.ipk", SHA, 10),
         package("not.installed", "1.0.0", "https://example.com/n.ipk", SHA, 10),
     ]}))
@@ -58,6 +70,7 @@ fn only_newer_versions_of_installed_homebrew_apps_are_due_never_luma_or_homebrew
         ("com.limelight.webos".to_string(), "1.6.36".to_string()),
         ("youtube.leanback.v4".to_string(), "0.5.3".to_string()),
         ("com.eluz1ve.lumaplus".to_string(), "2.16.0".to_string()),
+        (crate::platform::APP_ID.to_string(), "1.0.0".to_string()),
         ("org.webosbrew.hbchannel".to_string(), "0.7.3".to_string()),
         ("local.only".to_string(), "1.0.0".to_string()),
     ]);

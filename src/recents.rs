@@ -43,15 +43,7 @@ impl Command {
 }
 
 fn excluded(id: &str) -> bool {
-    matches!(
-        id,
-        APP_ID
-            | HOME_ID
-            | FULL_HOME_ID
-            | "com.luma.native"
-            | "com.luma.launcher"
-            | "com.luma.launcher.native"
-    )
+    matches!(id, APP_ID | HOME_ID | FULL_HOME_ID) || luma_tv_helper::OTHER_LUMA_APPS.contains(&id)
 }
 
 pub fn closable_in_batch(id: &str) -> bool {

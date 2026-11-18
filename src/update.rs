@@ -2,24 +2,24 @@ pub mod discovery {
     use serde::{Deserialize, Serialize};
     use std::{io::Read, sync::mpsc, thread, time::Duration};
 
-    const FEED: &str = "https://github.com/eluz1ve/lg-luma-plus/releases/latest/download/repo.json";
+    use super::{FEED, SELF_UPDATE_ENABLED, numeric_version};
+    use crate::platform::APP_ID;
+
     const LIMIT: usize = 256 * 1024;
     /// The latest releases, for what changed since the installed build; about 220 KB.
-    const RELEASES: &str = "https://api.github.com/repos/eluz1ve/lg-luma-plus/releases?per_page=20";
+    const RELEASES: &str =
+        "https://api.github.com/repos/davidsantanaalves/luma-evolution/releases?per_page=20";
     const RELEASES_LIMIT: usize = 1024 * 1024;
 
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
     #[serde(rename_all = "snake_case")]
     pub enum Status {
         #[default]
+        Disabled,
         Unchecked,
         Checking,
         Checked,
         Failed,
-    }
-
-    pub fn public_checks_enabled(scripted: bool, simulated: bool) -> bool {
-        !scripted && !simulated
     }
 
     pub struct Service {
@@ -30,8 +30,9 @@ pub mod discovery {
     }
 
     impl Service {
-        /// Interactive desktop and TV runs share the feed; scripted/simulated previews stay offline.
+        /// Public checks require a validated release channel as well as an interactive run.
         pub fn new(enabled: bool) -> Self {
+            let enabled = enabled && SELF_UPDATE_ENABLED;
             let (sender, receiver) = mpsc::channel();
             let (changes_tx, changes) = mpsc::channel();
             let (command_tx, command_rx) = mpsc::channel();
@@ -49,10 +50,7 @@ pub mod discovery {
                     let result = if enabled {
                         fetch(&agent, FEED, env!("CARGO_PKG_VERSION"))
                     } else {
-                        Err(
-                            "Public release checks are disabled for scripted/simulated previews"
-                                .into(),
-                        )
+                        Err("Public release checks are disabled".into())
                     };
                     let offered = result.clone().ok().flatten();
                     if sender.send(result).is_err() {
@@ -145,7 +143,7 @@ pub mod discovery {
     pub fn changes_since(releases: &[u8], current: &str) -> Result<Vec<String>, String> {
         let releases: Vec<Published> =
             serde_json::from_slice(releases).map_err(|_| "The releases could not be read")?;
-        let current = version(current).ok_or("The installed version is not valid")?;
+        let current = numeric_version(current).ok_or("The installed version is not valid")?;
         let mut builds: Vec<_> = releases
             .iter()
             .filter(|release| !release.draft && !release.prerelease)
@@ -184,48 +182,27 @@ pub mod discovery {
         version: String,
     }
 
-    /// Shipping releases use strict three-part numeric versions, never lexical comparison.
-    pub(super) fn version(value: &str) -> Option<[u64; 3]> {
-        if value.len() > 32 {
-            return None;
-        }
-        let parts: Vec<_> = value.split('.').collect();
-        if parts.len() != 3 {
-            return None;
-        }
-        let mut result = [0; 3];
-        for (index, part) in parts.into_iter().enumerate() {
-            if part.is_empty()
-                || (part.len() > 1 && part.starts_with('0'))
-                || !part.bytes().all(|byte| byte.is_ascii_digit())
-            {
-                return None;
-            }
-            result[index] = part.parse().ok()?;
-        }
-        Some(result)
-    }
-
     pub fn newer_version(bytes: &[u8], current: &str) -> Result<Option<String>, String> {
-        let current = version(current).ok_or("Invalid installed version")?;
+        let current = numeric_version(current).ok_or("Invalid installed version")?;
         let feed: Feed = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
         let mut matching = feed
             .packages
             .into_iter()
-            .filter(|package| package.id == "com.eluz1ve.lumaplus");
+            .filter(|package| package.id == APP_ID);
         let package = matching
             .next()
             .ok_or("Luma is missing from the release feed")?;
-        if matching.next().is_some() || package.manifest.id != "com.eluz1ve.lumaplus" {
+        if matching.next().is_some() || package.manifest.id != APP_ID {
             return Err("Ambiguous Luma release metadata".into());
         }
-        let latest = version(&package.manifest.version).ok_or("Invalid release version")?;
+        let latest = numeric_version(&package.manifest.version).ok_or("Invalid release version")?;
         Ok((latest > current).then_some(package.manifest.version))
     }
 
     pub fn validate_preview(latest: &str, current: &str) -> Result<(), String> {
-        let current = version(current).ok_or("Invalid installed version")?;
-        let latest = version(latest).ok_or("Update preview requires a version such as 99.0.0")?;
+        let current = numeric_version(current).ok_or("Invalid installed version")?;
+        let latest =
+            numeric_version(latest).ok_or("Update preview requires a version such as 99.0.0")?;
         if latest < current {
             return Err(
                 "Update preview version must match or be newer than the installed version".into(),
@@ -238,11 +215,17 @@ pub mod discovery {
     mod tests {
         use super::*;
         #[test]
-        fn interactive_checks_are_live_but_scripts_and_simulations_stay_offline() {
-            assert!(public_checks_enabled(false, false));
-            assert!(!public_checks_enabled(true, false));
-            assert!(!public_checks_enabled(false, true));
-            assert!(!public_checks_enabled(true, true));
+        fn even_interactive_requests_are_disabled_during_foundation() {
+            let service = Service::new(true);
+            assert!(service.receiver.try_recv().is_err());
+            service.check();
+            assert_eq!(
+                service
+                    .receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap(),
+                Err("Public release checks are disabled".into())
+            );
         }
         fn published(tag: &str, body: &str) -> serde_json::Value {
             serde_json::json!({"tag_name": tag, "body": body, "draft": false, "prerelease": false})
@@ -256,7 +239,7 @@ pub mod discovery {
                 published("build-2611081534", "### Changes\n\n- Already installed\n"),
                 published(
                     "build-2611081612",
-                    "### Changes\n\n- Second\n- Third\n\nSince Luma+ build #2611081603: [a...b](https://example.com)\n",
+                    "### Changes\n\n- Second\n- Third\n\nSince Luma Evolution build #2611081603: [a...b](https://example.com)\n",
                 ),
                 published("build-2611081603", "### Changes\n\n- First\n"),
             ];
@@ -302,7 +285,7 @@ pub mod discovery {
             }
         }
         fn feed(value: &str) -> Vec<u8> {
-            serde_json::to_vec(&serde_json::json!({"packages":[{"id":"com.eluz1ve.lumaplus","manifest":{"id":"com.eluz1ve.lumaplus","version":value}}]})).unwrap()
+            serde_json::to_vec(&serde_json::json!({"packages":[{"id":"com.davidsantana.lumaevolution","manifest":{"id":"com.davidsantana.lumaevolution","version":value}}]})).unwrap()
         }
         #[test]
         fn compares_numeric_versions_and_never_offers_equal_or_older_releases() {
@@ -334,7 +317,7 @@ pub mod discovery {
                 assert!(newer_version(&feed(value), "2.13.0").is_err());
             }
             assert!(newer_version(br#"{"packages":[]}"#, "2.13.0").is_err());
-            assert!(newer_version(br#"{"packages":[{"id":"com.eluz1ve.lumaplus","manifest":{"id":"other","version":"9.0.0"}}]}"#, "2.13.0").is_err());
+            assert!(newer_version(br#"{"packages":[{"id":"com.davidsantana.lumaevolution","manifest":{"id":"other","version":"9.0.0"}}]}"#, "2.13.0").is_err());
             assert!(newer_version(b"not json", "2.13.0").is_err());
             let package: serde_json::Value = serde_json::from_slice(&feed("9.0.0")).unwrap();
             let entry = &package["packages"][0];
@@ -391,7 +374,7 @@ pub mod discovery {
         }
     }
 }
-pub use discovery::{Service, Status, public_checks_enabled, validate_preview};
+pub use discovery::{Service, Status, validate_preview};
 use serde_json::Value;
 use std::{
     fs,
@@ -403,10 +386,15 @@ use std::{
     time::Instant,
 };
 
-pub const FEED: &str = "https://github.com/eluz1ve/lg-luma-plus/releases/latest/download/repo.json";
+use crate::platform::APP_ID;
+use luma_tv_helper::app_update::numeric_version;
+
+pub const SELF_UPDATE_ENABLED: bool = false;
+const FEED: &str =
+    "https://github.com/davidsantanaalves/luma-evolution/releases/latest/download/repo.json";
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 /// Only IPKs from this project's own release assets are installed.
-const RELEASES: &str = "https://github.com/eluz1ve/lg-luma-plus/releases/download/";
+const RELEASES: &str = "https://github.com/davidsantanaalves/luma-evolution/releases/download/";
 /// A fresh directory per attempt; never truncate a predictable path in shared /tmp.
 pub(crate) fn download_directory() -> Result<(String, PathBuf), String> {
     use ring::rand::SecureRandom;
@@ -416,7 +404,7 @@ pub(crate) fn download_directory() -> Result<(String, PathBuf), String> {
         .fill(&mut random)
         .map_err(|_| "No secure randomness")?;
     let attempt: String = random.iter().map(|b| format!("{b:02x}")).collect();
-    let directory = std::env::temp_dir().join(format!("luma-update-{attempt}"));
+    let directory = std::env::temp_dir().join(format!("luma-evolution-update-{attempt}"));
     fs::DirBuilder::new()
         .mode(0o700)
         .create(&directory)
@@ -450,7 +438,7 @@ fn wait_for_install(attempt: &str) -> Result<(), String> {
         }
         if Instant::now() >= deadline {
             return Err(
-                "The update did not finish in time. Check /var/lib/luma-update before retrying."
+                "The update did not finish in time. Check /var/lib/luma-evolution-update before retrying."
                     .into(),
             );
         }
@@ -458,7 +446,7 @@ fn wait_for_install(attempt: &str) -> Result<(), String> {
     }
 }
 const FEED_LIMIT: u64 = 256 * 1024;
-pub(crate) const MAX_IPK: u64 = 96 * 1024 * 1024;
+pub(crate) const MAX_IPK: u64 = luma_tv_helper::ipk::MAX_IPK as u64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Release {
@@ -478,13 +466,13 @@ pub enum InstallStatus {
 }
 
 pub fn newer(current: &str, candidate: &str) -> bool {
-    matches!((discovery::version(current), discovery::version(candidate)), (Some(a), Some(b)) if b > a)
+    matches!((numeric_version(current), numeric_version(candidate)), (Some(a), Some(b)) if b > a)
 }
 
 /// How a version is shown. Builds are versioned by when they were made (`tools/build-number.mjs`):
 /// 26.1108.1530 is build #2611081530, of 8 November 2026 at 15:30. Older versions show as they are.
 pub fn label(version: &str) -> String {
-    let build = discovery::version(version).filter(|&[year, date, time]| {
+    let build = numeric_version(version).filter(|&[year, date, time]| {
         let (month, day, hour, minute) = (date / 100, date % 100, time / 100, time % 100);
         year < 100
             && (1..=12).contains(&month)
@@ -504,12 +492,12 @@ pub fn parse_feed(feed: &Value) -> Result<Release, String> {
         .as_array()
         .ok_or("The release feed has no packages")?
         .iter()
-        .filter(|package| package["id"] == "com.eluz1ve.lumaplus");
+        .filter(|package| package["id"] == APP_ID);
     let manifest = packages
         .next()
         .map(|package| &package["manifest"])
         .ok_or("The release feed has no Luma package")?;
-    if packages.next().is_some() || manifest["id"] != "com.eluz1ve.lumaplus" {
+    if packages.next().is_some() || manifest["id"] != APP_ID {
         return Err("Ambiguous Luma release metadata".into());
     }
     let text = |key: &str| manifest[key].as_str().unwrap_or_default().to_owned();
@@ -522,11 +510,23 @@ pub fn parse_feed(feed: &Value) -> Result<Release, String> {
             .to_ascii_lowercase(),
         size: manifest["ipkSize"].as_u64().unwrap_or_default(),
     };
-    if discovery::version(&release.version).is_none() {
+    if numeric_version(&release.version).is_none() {
         return Err("The release feed has no valid version".into());
     }
-    let file = release.url.strip_prefix(RELEASES).unwrap_or_default();
-    if !file.ends_with("_arm.ipk") || file.contains(['?', '#', '\\']) || file.contains("..") {
+    let expected = format!("{APP_ID}_{}_arm.ipk", release.version);
+    let valid_url = release
+        .url
+        .strip_prefix(RELEASES)
+        .and_then(|asset| asset.split_once('/'))
+        .is_some_and(|(tag, file)| {
+            !tag.is_empty()
+                && !tag.contains("..")
+                && tag
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+                && file == expected
+        });
+    if !valid_url {
         return Err("The release feed points outside Luma's releases".into());
     }
     if release.sha256.len() != 64 || !release.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -643,10 +643,11 @@ pub struct Worker {
 
 impl Worker {
     pub fn new(enabled: bool) -> Self {
+        let enabled = enabled && SELF_UPDATE_ENABLED;
         let (requests, incoming) = mpsc::channel::<Request>();
         let (responses, receiver) = mpsc::channel();
         thread::Builder::new()
-            .name("luma-update".into())
+            .name("luma-evolution-update".into())
             .spawn(move || {
                 let agent = agent();
                 for request in incoming {
@@ -710,7 +711,7 @@ impl Worker {
                         }
                         Request::Recover => continue,
                         Request::Download(_) => Response::Finished(Err(
-                            "Installation is only available in interactive TV runs".into(),
+                            "Luma Evolution self-update installation is disabled".into(),
                         )),
                     };
                     if responses.send(response).is_err() {
@@ -734,12 +735,12 @@ mod tests {
     use serde_json::json;
 
     fn feed(version: &str, url: &str, sha: &str, size: u64) -> Value {
-        json!({"packages": [{"id": "com.eluz1ve.lumaplus", "manifest": {
-            "id": "com.eluz1ve.lumaplus", "version": version, "ipkUrl": url, "ipkHash": {"sha256": sha}, "ipkSize": size
+        json!({"packages": [{"id": "com.davidsantana.lumaevolution", "manifest": {
+            "id": "com.davidsantana.lumaevolution", "version": version, "ipkUrl": url, "ipkHash": {"sha256": sha}, "ipkSize": size
         }}]})
     }
 
-    const URL: &str = "https://github.com/eluz1ve/lg-luma-plus/releases/download/v9.0.0/com.eluz1ve.lumaplus_9.0.0_arm.ipk";
+    const URL: &str = "https://github.com/davidsantanaalves/luma-evolution/releases/download/v9.0.0/com.davidsantana.lumaevolution_9.0.0_arm.ipk";
 
     #[test]
     fn attempt_paths_are_private_unique_and_results_are_terminal_only_when_finished() {
@@ -799,7 +800,7 @@ mod tests {
 
     #[test]
     fn disabled_installer_rejects_downloads_without_network_or_platform_calls() {
-        let worker = Worker::new(false);
+        let worker = Worker::new(true);
         assert!(worker.receiver.try_recv().is_err());
         worker.request(Request::Download("99.0.0".into()));
         assert!(matches!(
@@ -819,6 +820,10 @@ mod tests {
         let mut foreign = entry;
         foreign["packages"][0]["manifest"]["id"] = json!("other.app");
         assert!(parse_feed(&foreign).is_err());
+        foreign["packages"][0]["id"] = json!(luma_tv_helper::LUMA_PLUS);
+        foreign["packages"][0]["manifest"]["id"] = json!(luma_tv_helper::LUMA_PLUS);
+        assert!(parse_feed(&foreign).is_err());
+        assert!(discovery::newer_version(foreign.to_string().as_bytes(), "1.0.0").is_err());
     }
 
     #[test]
@@ -830,17 +835,24 @@ mod tests {
         for bad in [
             feed(
                 "9.0.0",
-                "https://example.com/com.eluz1ve.lumaplus_9.0.0_arm.ipk",
+                "https://example.com/com.davidsantana.lumaevolution_9.0.0_arm.ipk",
                 &sha,
                 1000,
             ),
             feed(
                 "9.0.0",
-                "https://github.com/eluz1ve/lg-luma-plus/releases/download/../x_arm.ipk",
+                "https://github.com/davidsantanaalves/luma-evolution/releases/download/../x_arm.ipk",
                 &sha,
                 1000,
             ),
             feed("9.0.0", URL, "abc", 1000),
+            feed("9.1.0", URL, &sha, 1000),
+            feed(
+                "9.0.0",
+                "https://github.com/eluz1ve/lg-luma-plus/releases/download/v9.0.0/com.eluz1ve.lumaplus_9.0.0_arm.ipk",
+                &sha,
+                1000,
+            ),
             feed("9.0.0", URL, &sha, 0),
             feed("9.0.0", URL, &sha, MAX_IPK + 1),
             feed("nine", URL, &sha, 1000),

@@ -11,7 +11,7 @@ use std::{collections::HashSet, sync::mpsc, thread};
 #[path = "platform-install.rs"]
 mod installation;
 
-pub const APP_ID: &str = "com.eluz1ve.lumaplus";
+pub use luma_tv_helper::APP as APP_ID;
 pub const HOME_ID: &str = "com.webos.app.home";
 pub const FULL_HOME_ID: &str = "com.webos.app.fullhome";
 
@@ -67,7 +67,7 @@ pub fn runs_as_lg_home() -> bool {
     not(all(feature = "webos", target_os = "linux", target_arch = "arm")),
     allow(dead_code)
 )]
-pub const HOME_LIFECYCLE_OFF: &str = "/var/lib/luma-home/no-lifecycle";
+pub const HOME_LIFECYCLE_OFF: &str = "/var/lib/luma-evolution-home/no-lifecycle";
 
 /// Whether a relaunch actually brought a staged Home (webOS 10/11) to the front. Only the
 /// compositor's focus or remote input counts: SDL_ShowWindow emits Shown by itself, so Shown
@@ -149,19 +149,22 @@ pub fn install_dir() -> Result<std::path::PathBuf, String> {
 }
 
 pub fn redirect_to_home() -> Result<bool, String> {
+    if !luma_tv_helper::home::TAKEOVER_ENABLED {
+        return Ok(false);
+    }
     // The root-only integration mounts this marker with its native Home
     // manifest, or writes it to /var/run on webOS 5/6, where it mounts this
     // executable over LG's (a tile's jail sees /usr/bin without that mount).
     // A normal tile launch then opens that same instance instead of starting
     // a second renderer writing the same preferences.
     let marked = |file| std::fs::read_to_string(file).is_ok_and(|marker| marker.trim() == APP_ID);
-    if marked("/usr/palm/applications/com.webos.app.home/.luma-home")
-        || marked("/var/run/luma-home")
+    if marked("/usr/palm/applications/com.webos.app.home/.luma-evolution-home")
+        || marked("/var/run/luma-evolution-home")
     {
         thread::spawn(|| {
             call(
                 "luna://com.webos.applicationManager/launch",
-                json!({"id": std::fs::read_to_string("/var/run/luma-home-target").ok()
+                json!({"id": std::fs::read_to_string("/var/run/luma-evolution-home-target").ok()
                     .filter(|id| is_home_id(id.trim())).map(|id| id.trim().to_owned()).unwrap_or_else(|| HOME_ID.into())}),
             )
         })
@@ -461,9 +464,12 @@ pub fn start_update(
     attempt: &str,
     ipk: &std::path::Path,
 ) -> Result<(), String> {
+    if !crate::update::SELF_UPDATE_ENABLED {
+        return Err("Luma Evolution self-updates are disabled".into());
+    }
     let directory = install_dir()?;
     let command = format!(
-        "systemd-run --unit=luma-update-{} --collect /bin/sh -c {} self-update {} {} {} {} {}",
+        "systemd-run --unit=luma-evolution-update-{} --collect /bin/sh -c {} self-update {} {} {} {} {}",
         attempt,
         update_argument(include_str!("../tv/self-update.sh")),
         update_argument(&ipk.to_string_lossy()),
@@ -530,6 +536,9 @@ pub fn update_app(
 pub fn update_result_for(
     attempt: Option<&str>,
 ) -> Result<Option<crate::update::InstallResult>, String> {
+    if !crate::update::SELF_UPDATE_ENABLED {
+        return Ok(None);
+    }
     let file = match attempt {
         Some(id) if id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()) => {
             format!("result.{id}.json")
@@ -540,7 +549,7 @@ pub fn update_result_for(
     let envelope = call(
         "luna://org.webosbrew.hbchannel.service/exec",
         json!({
-            "command": format!("cat /var/lib/luma-update/{file} 2>/dev/null || true")
+            "command": format!("cat /var/lib/luma-evolution-update/{file} 2>/dev/null || true")
         }),
     )?;
     let output = envelope
@@ -589,6 +598,7 @@ fn sync_splash(background: &str) -> Result<(), String> {
 /// reliable cross-version removability flag.
 pub fn can_uninstall(id: &str) -> bool {
     valid_app_id(id)
+        && !luma_tv_helper::OTHER_LUMA_APPS.contains(&id)
         && !id.starts_with(crate::model::CUSTOM_TILE_PREFIX)
         && !crate::scroll_preview::is_placeholder(id)
         && !["com.webos.", "com.palm.", "com.lge."]
@@ -596,13 +606,7 @@ pub fn can_uninstall(id: &str) -> bool {
             .any(|prefix| id.starts_with(prefix))
         && !matches!(
             id,
-            APP_ID
-                | HOME_ID
-                | "com.luma.native"
-                | "com.luma.launcher"
-                | "com.luma.launcher.native"
-                | "org.webosbrew.hbchannel"
-                | "org.webosbrew.hbchannel.service"
+            APP_ID | HOME_ID | "org.webosbrew.hbchannel" | "org.webosbrew.hbchannel.service"
         )
 }
 
@@ -641,15 +645,18 @@ pub fn inventory_confirms_removal(apps: &Value, id: &str) -> Result<bool, String
 /// Runs the README's takeover commands through Homebrew Channel's root service: `home.sh enable`
 /// (after disabling the autostart method, answering its prompt) or `disable`. The script closes
 /// this instance and starts the new Home, so it runs detached and the reply only says whether it
-/// started; its output goes to /tmp/luma-home-toggle.log.
+/// started; its output goes to /tmp/luma-evolution-home-toggle.log.
 /// Luma's heartbeat as Home, which the watchdog reads (`luma-helper home watch`).
-pub const HEARTBEAT: &str = "/tmp/luma-home.alive";
+pub use luma_tv_helper::home::BEAT as HEARTBEAT;
 
 /// The watchdog runs as root in its own unit, apart from Homebrew Channel's exec, which ends its
 /// children; a second start finds the unit there and changes nothing.
 fn start_watchdog() -> Result<(), String> {
+    if !luma_tv_helper::home::TAKEOVER_ENABLED {
+        return Err("Luma Evolution Home takeover is disabled".into());
+    }
     let command = format!(
-        "systemd-run --unit=luma-home-watch --collect /bin/sh -c \"{} >>/tmp/luma-home-watch.log 2>&1\"",
+        "systemd-run --unit=luma-evolution-home-watch --collect /bin/sh -c \"{} >>/tmp/luma-evolution-home-watch.log 2>&1\"",
         helper_command("home", &["watch".to_owned()])?
     );
     let reply = call(
@@ -661,15 +668,18 @@ fn start_watchdog() -> Result<(), String> {
 }
 
 fn home_takeover(enable: bool) -> Result<(), String> {
+    if !luma_tv_helper::home::TAKEOVER_ENABLED {
+        return Err("Luma Evolution Home takeover is disabled".into());
+    }
     let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
     let script = if enable {
         let app = quote(&install_dir()?.to_string_lossy());
         format!("sh {app}/autostart.sh disable; printf 'y\\n' | sh {app}/home.sh enable")
     } else {
-        "sh /var/lib/luma-home/home.sh disable".into()
+        "sh /var/lib/luma-evolution-home/home.sh disable".into()
     };
     let command = format!(
-        "if [ \"$(id -u)\" != 0 ]; then printf '%s\\n' '{{\"returnValue\":false,\"errorText\":\"Homebrew Channel needs root access\"}}'; exit 0; fi; ( {script} ) </dev/null >/tmp/luma-home-toggle.log 2>&1 & printf '%s\\n' '{{\"returnValue\":true}}'"
+        "if [ \"$(id -u)\" != 0 ]; then printf '%s\\n' '{{\"returnValue\":false,\"errorText\":\"Homebrew Channel needs root access\"}}'; exit 0; fi; ( {script} ) </dev/null >/tmp/luma-evolution-home-toggle.log 2>&1 & printf '%s\\n' '{{\"returnValue\":true}}'"
     );
     let envelope = call(
         "luna://org.webosbrew.hbchannel.service/exec",
@@ -987,9 +997,7 @@ pub fn normalize_apps(raw: &Value) -> Result<Vec<App>, String> {
         let live = id == "com.webos.app.livetv";
         let visible = entry.get("visible");
         if id == APP_ID
-            || id == "com.luma.native"
-            || id == "com.luma.launcher"
-            || id == "com.luma.launcher.native"
+            || luma_tv_helper::OTHER_LUMA_APPS.contains(&id)
             || is_home_id(id)
             || id.starts_with("com.webos.app.hdmi")
             || id.starts_with("com.webos.app.externalinput.")

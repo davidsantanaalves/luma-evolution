@@ -1,4 +1,4 @@
-# Luma development
+# Luma Evolution development
 
 ## Layout
 
@@ -18,7 +18,7 @@ dist/                        Generated ARM IPK, checksum and Homebrew feed
 
 The launcher is rendered natively, without React, JSX, Vite or a browser runtime. Node/pnpm
 remain build/deployment tools for Sharp, the webOS CLI and formatting/linting. The installed app
-is the Rust executable `luma`, with app ID `com.eluz1ve.lumaplus`. The companion pages in
+is the Rust executable `luma`, with app ID `com.davidsantana.lumaevolution`. The companion pages in
 `assets/wallpaper-upload/` and `assets/tile-editor/` are plain HTML/CSS/JavaScript, embedded in the
 native executable and served temporarily to the owner's phone or computer; they do not render the
 TV interface.
@@ -664,10 +664,10 @@ the original process arguments available to SDL/libhelpers. To expose the actual
 sandbox's stdout/stderr, close Luma and run in the TV's root SSH shell:
 
 ```sh
-APP=/media/developer/apps/usr/palm/applications/com.eluz1ve.lumaplus
+APP=/media/developer/apps/usr/palm/applications/com.davidsantana.lumaevolution
 XDG_RUNTIME_DIR=/tmp/xdg RUST_BACKTRACE=1 /usr/bin/jailer \
-  -t native_devmode -i com.eluz1ve.lumaplus -p "$APP" \
-  "$APP/luma" '{"@system_native_app":true,"nid":"com.eluz1ve.lumaplus"}'
+  -t native_devmode -i com.davidsantana.lumaevolution -p "$APP" \
+  "$APP/luma" '{"@system_native_app":true,"nid":"com.davidsantana.lumaevolution"}'
 ```
 
 Startup prints accepted launch parameters, SDL driver, actual sample count, cumulative stage
@@ -689,9 +689,39 @@ failures preserve the last valid inputs. No failed inventory read substitutes de
 
 ### Optional native Home integration
 
+The takeover code is retained for simulation. Foundation builds reject enable, boot/apply,
+watch, restore and disable before touching takeover state. The installed wrapper supports
+read-only status. Evidence dated before this fork applies to upstream builds.
+
+Evolution reserves its own state, markers, logs, watchdog and hook.
+
+| Component                                | Evolution                                                        | Upstream                                     |
+| ---------------------------------------- | ---------------------------------------------------------------- | -------------------------------------------- |
+| Takeover state, stage, lock and boot log | `/var/lib/luma-evolution-home`                                   | `/var/lib/luma-home`                         |
+| Runtime markers                          | `/var/run/luma-evolution-home{,-target,-fallback}`               | `/var/run/luma-home{,-target,-fallback}`     |
+| Staged manifest marker                   | `.luma-evolution-home`                                           | `.luma-home`                                 |
+| Heartbeat and takeover logs              | `/tmp/luma-evolution-home*`                                      | `/tmp/luma-home*`                            |
+| Watchdog unit                            | `luma-evolution-home-watch`                                      | `luma-home-watch`                            |
+| Takeover hook                            | `64-luma-evolution-home`                                         | `64-luma-home`                               |
+| Standalone autostart                     | `65-luma-evolution`, `/var/run/luma-evolution-boot`              | `65-luma`, `/tmp/luma-boot*`                 |
+| Update state and staging                 | `/var/lib/luma-evolution-update`, `/tmp/luma-evolution-update-*` | `/var/lib/luma-update`, `/tmp/luma-update-*` |
+| Self-update unit                         | `luma-evolution-update-*`                                        | `luma-update-*`                              |
+
+Hooks live under `/var/lib/webosbrew/init.d`. The takeover code treats upstream hooks or
+foreign mounts as conflicts. LG Home retains its original system app IDs.
+
+### Settings → Advanced proposal
+
+Keep routine display and personalization controls in their current sections. In a later
+approved design, group privileged system actions under **Advanced**, with independent
+availability for Home takeover, standalone autostart and launcher updates. Takeover needs
+conflict diagnostics, an explicit activation step and a documented recovery path.
+
+### Retained takeover implementation
+
 `tv/home.sh` and the native Rust `luma-helper` executable are packaged beside `luma`. They are a root-only, explicit integration
 for webOS 10/25 and 11/26 (and webOS 5/6 and 9/24, see below). `enable` stages a native manifest with ID `com.webos.app.home` and
-symlinks to the installed executable, libraries and assets under `/var/lib/luma-home/app`, then
+symlinks to the installed executable, libraries and assets under `/var/lib/luma-evolution-home/app`, then
 bind-mounts it over `/usr/palm/applications/com.webos.app.home`. SAM rereads that one app through
 `blockSystemApp` followed by `releaseBlockSystemApp`, including `forceBlockSystemApp: false` when
 the TV schema requires it. The script verifies the reported manifest before stopping the previous
@@ -720,12 +750,12 @@ executable itself stays at its installed path for LS2 authentication, `$ORIGIN/l
 and preference selection. Opening Luma's normal tile while the Home mount is active redirects to
 the Home instance. The scripts do not create a browser wrapper or change the package's app ID.
 
-`64-luma-home` reapplies the mount from a detached boot hook. The existing TV Home Auto Launch
+`64-luma-evolution-home` reapplies the mount from a detached boot hook. The existing TV Home Auto Launch
 and Quick Start+ settings determine whether power-on opens Home. Until the hook applies, LG Home
 can still appear. This integration does not change those settings or install a remote-key filter.
 `disable` (also `restore`) removes the mount, refreshes LG's manifest, stops the native Home
-instance and removes the boot hook. The copied restore scripts remain in `/var/lib/luma-home`
-even if the installed package is removed. Disable the standalone `65-luma` cold-boot hook before
+instance and removes the boot hook. The copied restore scripts remain in `/var/lib/luma-evolution-home`
+even if the installed package is removed. Disable the standalone `65-luma-evolution` cold-boot hook before
 enabling this integration.
 
 Build and script checks cannot establish native Home compatibility. Manually verify Home, Back
@@ -758,7 +788,7 @@ is bound to that executable path. Luma detects this (`platform::runs_as_lg_home`
   discovery validates the package manifest and matches the executable by device/inode, so assets
   and splash updates use the source package even when developer and production copies both exist.
   A missing or unrelated source package is an explicit startup error;
-- writes its stderr to `/tmp/luma-home.log`, because SAM discards a system app's output;
+- writes its stderr to `/tmp/luma-evolution-home.log`, because SAM discards a system app's output;
 - skips the per-icon elevated-service fallback for installed artwork: as root every file is
   readable, so that fallback would only spend seconds per icon to fail the same way.
 
@@ -771,7 +801,7 @@ after 6 s, because SAM can accept the first launch right after the old process s
 starting anything; otherwise the mount is removed again. A mount whose source is Luma's executable
 counts as its own also after a package update (`//deleted`) and is replaced; any other mount over
 LG's executable is refused. `disable` unmounts (lazily while Home runs), stops Luma and reopens LG
-Home if Home was in front. While mounted, `/var/run/luma-home` names Luma, so a normal
+Home if Home was in front. While mounted, `/var/run/luma-evolution-home` names Luma, so a normal
 tile launch redirects to the Home instance: the tile's jail sees `/usr/bin` without the mount but
 shares `/var/run`, which is volatile like the mount itself. LG's file stays underneath, and a cold boot
 without the hook gives LG's Home back. Verified on an LG 49UN7100
@@ -789,7 +819,7 @@ never as a registered app: on every Home key it kills Luma and starts it again. 
 of LG's executable is not an option here, because LG Home's role
 (`/usr/share/luna-service2/roles.d/com.webos.app.home.app.json`) is app-ID based
 (`"appId": "com.webos.app.home"`, names `com.webos.app.home-*`), not bound to a path, and Luma's
-role only allows `com.eluz1ve.lumaplus` or an anonymous name.
+role only allows `com.davidsantana.lumaevolution` or an anonymous name.
 
 The staged Home runs as root, and as root the system-bus `luna-send -a` may act for an app ID.
 So when `options.webos_home` is set outside LG's executable path and the effective user is root,
@@ -806,7 +836,7 @@ handling as v2.
   the existing restore/show/raise path. This applies to both Home identities and integration
   methods, independently of registration success; normal Luma tile launches are unchanged.
   Manually verify that preload leaves an active app or HDMI input in front, Home reveals Luma,
-  and Home still works with registration refused or `/var/lib/luma-home/no-lifecycle` present
+  and Home still works with registration refused or `/var/lib/luma-evolution-home/no-lifecycle` present
   (SAM's restart fallback). Hidden-window behavior requires TV verification.
 - No answer within 10 s, a refused answer or the child ending before an answer kills and reaps
   the child and leaves Home unregistered, as before this integration: SAM restarts it per Home
@@ -820,12 +850,12 @@ handling as v2.
   3 s for `FocusGained` or a remote key, which only reach the focused surface. `Shown` and
   `Restored` do not count, because `SDL_ShowWindow` emits `Shown` itself whether or not the raise
   reached the screen. Without confirmation, Luma assumes it cannot bring itself forward on this
-  firmware: it creates `/var/lib/luma-home/no-lifecycle` and ends the registration, which quits
+  firmware: it creates `/var/lib/luma-evolution-home/no-lifecycle` and ends the registration, which quits
   it, so SAM starts Home afresh. While that file exists, Luma does not register and Home behaves
   as before. Delete it to try again.
 - A setup error after the child started (e.g. a thread cannot be created) kills and reaps the
   child before returning the error, so no registration is left behind while Luma keeps running.
-- stderr goes to `/tmp/luma-home.log` in this mode too. Replies are logged as
+- stderr goes to `/tmp/luma-evolution-home.log` in this mode too. Replies are logged as
   `Luma lifecycle: …`, the helper's end as `Luma app subscription ended (was registered: …)`,
   and window visibility and focus changes as `Luma window: …`.
 - `app_subscription` has no LS2 dependency, so its host tests run it against fake `luna-send`
@@ -873,7 +903,7 @@ method uses its source installation for storage precedence and legacy migration,
 valid weather cache from beside this installation's old executable are imported once, without
 overwriting the chosen destination. Invalid existing preferences still report an error.
 Startup prints `Luma persistent storage:` with the chosen path. Desktop preview retains the legacy
-`$XDG_CONFIG_HOME/luma-native/preferences.json` path, or `~/.config/luma-native/preferences.json`,
+`$XDG_CONFIG_HOME/luma-evolution/preferences.json` path, or `~/.config/luma-evolution/preferences.json`,
 so existing preview choices survive flattening. `--preferences PATH` isolates a manual run.
 Invalid preference files report an error rather than being overwritten. Writes use atomic
 temporary-file renames; use one instance per preferences file. Browser local storage is not
@@ -921,33 +951,14 @@ builds.
 
 ## Update availability
 
-On interactive desktop or TV startup a separate worker checks
-`https://github.com/eluz1ve/lg-luma-plus/releases/latest/download/repo.json` once per process automatically.
-**Settings → System → Check again** retries on the same worker, with one request in flight at a time.
-It only reads the `com.eluz1ve.lumaplus` package/manifest version and compares numeric major/minor/patch
-components with the compiled version. Equal, older, malformed or prerelease versions do not offer
-updates. HTTP is HTTPS-only with bounded redirects, a ten-second timeout, a 256 KiB reply limit and
-no proxy; failures are logged without interrupting launch and the status card offers retry.
-Scripted captures and simulated update previews do not contact GitHub. Interactive desktop checks
-use the same endpoint and worker as TV. The card shows the current version and only reports
-**No newer version found** after a successful check, never while unchecked or offline.
-A newer version shows an **Update available** notice and a **Settings → System** card with both
-versions. Its **Install {version}** button explicitly starts installation on interactive TV runs.
-The read-only checker never downloads an IPK. A separate installer worker rechecks release metadata,
-requires the exact offered version, and accepts only this project's ARM release assets with a bounded
-size and SHA-256. It downloads into a private random directory and verifies both before handing off
-to `tv/self-update.sh`, detached through Homebrew Channel's root service into a systemd unit.
-The handoff escapes dollar signs for systemd as well as quoting for the
-exec service's shell, so systemd cannot expand the embedded script before `/bin/sh` runs it.
-The installer locks, stages and re-verifies a root-owned copy, removes the download (and download
-directories over an hour old, which earlier runs left), waits for installation completion and
-checks the installed version before reopening Luma. Home takeover refreshes from the new package;
-failed reapplication attempts verified LG Home recovery. Atomic attempt-specific results and a log
-persist in `/var/lib/luma-update`. The card displays progress, ignores repeated presses while busy,
-and returns to **Check again** after failure. On restart the installer worker observes an unfinished
-attempt or reports its persisted failure. Desktop and scripted/simulated runs cannot install.
-`self-update.sh` is embedded in the running build, while `home.sh` and `luma-helper` come from the
-package being installed: a change to the script takes effect one update later than a helper change.
+Foundation builds disable discovery and installation of launcher updates, including manual
+requests through Settings and calls to the privileged installer. The reserved feed is
+`https://github.com/davidsantanaalves/luma-evolution/releases/latest/download/repo.json`.
+Feed validation requires the Evolution package and manifest IDs and an exact versioned ARM
+IPK filename on the Evolution release origin. The dormant installer checks the checksum,
+staged filename, package control and app manifests before passing the same root-owned bytes to LG.
+Installer results and
+logs use `/var/lib/luma-evolution-update`.
 
 While an update is on offer, System's summary lists what changed since the installed build: the
 bulleted notes of every newer `build-*` release, newest first, as many as fit and a count of the
@@ -974,16 +985,25 @@ package installation in these previews.
 Update Homebrew apps automatically** (`homebrew_updates`, default off) is on. Ten minutes after
 start and then every twelve hours it reads `https://repo.webosbrew.org/api/apps.json` once
 (HTTPS-only agent shared with the update worker, 4 MiB limit). Packages with an invalid id or
-version, a non-HTTPS or escaping URL, a malformed SHA-256 or an implausible size are skipped. It
+version, a non-HTTPS or escaping URL, a malformed SHA-256 or an implausible size are skipped.
+Duplicate app IDs in the feed are excluded. It
 compares the versions in `/media/developer/apps/usr/palm/applications/*/appinfo.json` (folders
-whose manifest names another app are ignored) and never downgrades or touches `com.eluz1ve.lumaplus` or
+whose manifest names another app are ignored) and never downgrades or touches `com.davidsantana.lumaevolution` or
 `org.webosbrew.hbchannel`. A newer package is downloaded with the update worker's size and SHA-256
 check into a private random directory, then handed to `luma-helper app-update ID VERSION SHA256
-IPK` through Homebrew Channel's exec. The helper repeats every check as root: it copies the
-package into `/var/lib/luma-update/apps`, verifies the SHA-256 of that copy, refuses while SAM
+IPK` through Homebrew Channel's exec. The helper verifies SHA-256 and checks the control and
+manifest IDs and versions against the request. It stages the same bytes in a private directory
+under `/var/lib/luma-evolution-update/apps` with a name built from the verified ID, version and
+architecture, refuses while SAM
 lists the app as running, installs through `com.webos.appInstallService/dev/install`, and
 reports success only once the installed manifest shows the new version (up to four minutes). A
 running app is retried at the next check. Successful updates show a short notice.
+
+The package checks accept the webOS `ar` layout with gzip-compressed control and data archives.
+They reject conflicting or repeated paths, tar extensions, links, special entries and installer
+scripts. A Homebrew package can carry services in its app's namespace when its package manifest
+declares exactly those services. The Evolution package contains one launcher and no service
+payload. Its shell scripts require LF and pass `sh -n` on the same bytes checked in the IPK.
 
 ## CS2 Scores
 
@@ -1003,19 +1023,19 @@ by default. The widget is named "CS2 Scores" in every language. A result counts 
 feed's `finished_at`, when the feed first saw the match over, against its own `updated`, so a
 wrong clock on the TV does not matter.
 
-The data is the shared feed `cs2/matches.json`, rebuilt from LiquipediaDB on the feeds' own
-server; the LiquipediaDB key stays there and never reaches a TV. Luma reads the file every
-minute while Home shows the widget, from the fixed `luma.eluzive.dev` origin only, with the
+The widget depends on the upstream Luma feeds service at `https://luma.eluzive.dev`.
+The service rebuilds `/cs2/matches.json` from LiquipediaDB and keeps the API key on its server.
+Evolution reads the file every minute while Home shows the widget with the
 weather client's limits (rustls, eight-second timeout, no
 redirects or proxy, 256 KiB). A feed older than 30 minutes is still shown, with "Last updated"
 and its time beside the heading, so a stalled feed shows old scores rather than none. Team and tournament logos and map screenshots come only from
-`liquipedia.net/commons/images/` or the feed server's `luma.eluzive.dev/img/`, one at a time on their own worker, at most 1 MiB each, decoded
+`https://liquipedia.net/commons/images/` or the feed server's `/img/`, one at a time on their own worker, at most 1 MiB each, decoded
 with app artwork's limits (logos at 256 px, map screenshots at 640 px for the dialog) and kept in
 memory up to 64. `--cs2-test-server` accepts only a literal loopback HTTP origin and is refused in
 TV builds.
 
 While a match is being played, the feeds server follows HLTV's scorebot for it and writes
-`cs2/live/<id>.json` every second and `cs2/live/index.json` (map, round and round score of every
+`/cs2/live/<id>.json` every second and `/cs2/live/index.json` (map, round and round score of every
 such match) every 30 seconds (`src/cs2-live.rs` parses both, at most 128 KiB, from the same
 origin). Luma reads the index every minute while Home shows the widget, and puts the round score
 on the live map's tile, the Home card and the Today lines, coloured by the sides when the open
@@ -1033,7 +1053,7 @@ does not play them properly.
 
 ## Compatibility
 
-Luma's native startup, rendering and app/input discovery have been verified on rooted webOS 26.
+Upstream Luma+'s native startup, rendering and app/input discovery were verified on rooted webOS 26.
 External testing confirms compatibility with webOS 6 and newer. On webOS 26 use elevated Homebrew Channel
 0.8.0-rc1+ for `lunabus.query`. Root SSH execution does not establish the normal jailed caller
 permissions; check TV-menu startup, launching/reopening and remote/pointer behavior manually.
@@ -1068,10 +1088,9 @@ to avoid compiling the same executable again. Local smoke commands still build b
 The ARM package job runs alongside these suites using the shared assets, cross-links with a
 pinned Linux SDK, inspects/normalizes the actual IPK and generates checksums/feed. The existing
 **Rust checks, rendering, and native package** check remains as an aggregate that requires every
-preparation, smoke and package job to succeed. It uploads release/rendering artifacts on PRs,
-main-branch pushes and manual runs. `pnpm check` also validates synchronized release versions,
-and `pnpm test:release` covers version synchronization and the publish gate, including the real
-Changesets version command in an isolated fixture. Host CI cannot prove hardware compatibility,
+preparation, smoke and package job to succeed. It uploads build and rendering artifacts on PRs,
+`develop` and `main` pushes, and manual runs. `pnpm check` validates synchronized release versions.
+`pnpm test:release` exercises the release tooling with local fixtures. Host CI cannot prove hardware compatibility,
 small-text quality or presentation frame rate.
 
 ### PR test IPKs
@@ -1091,13 +1110,14 @@ or rerun a workflow to rebuild the same commit.
 Only the build job checks out PR code. It has read-only repository access, no persisted
 checkout credentials and no shared build caches. A separate job with comment-writing permission
 uses the trusted base-branch workflow and GitHub's artifact API without checking out PR code.
-The package keeps the normal `com.eluz1ve.lumaplus` identity and version, so installing it replaces
-the existing Luma app. These builds are for manual TV verification; the ordinary CI checks still
+The package keeps the normal `com.davidsantana.lumaevolution` identity and version, so installing it replaces
+an existing Evolution installation. These builds are for manual TV verification; the ordinary CI checks still
 run independently.
 
 ## Releases
 
-Every push to `main` is released. CI numbers the build by its date and time in Chisinau,
+Publication is disabled for pushes, pull requests and manual runs. CI still numbers each build
+by its date and time in Chisinau,
 `YYMMDDHHmm` (`tools/build-number.mjs`): build **#2611081530** was made on 8 November 2026 at
 15:30. Its app version is the same digits split in three, `26.1108.1530`, which webOS, Cargo and
 the updater compare as numbers, so a later build is always newer, and every build is newer than
@@ -1108,18 +1128,9 @@ into `package.json` and synchronize `appinfo.json`, the root `Cargo.toml`, the `
 `Cargo.lock` and the README IPK examples in their checkout (`node tools/build-number.mjs --apply`,
 after the Rust cache step). The repository itself keeps `1.0.0`; nothing is committed back.
 
-After the checks, all four smoke suites and the verified ARM package pass, the release job
-publishes **Luma+ build #2611081530** under the tag `build-2611081530` with the IPK, checksums and
-Homebrew feed, as the latest release. Its notes (`tools/release-notes.mjs`) list the subjects of
-the commits since the newest published release the build descends from, oldest first, with a
-comparison link. Write commit subjects for readers of the release.
-
-A manual run of the CI workflow on `main` (**Actions → CI → Run workflow**) releases it too.
-Pull requests and manual runs of other branches build, check and package without publishing. To push without a
-build, put `[skip ci]` in the commit message. An already published build is skipped, a draft is
-resumed, and a tag on another commit fails the run: push again for a new number. Several pushes
-waiting behind a running build are released together by the newest. To retry a failed
-publication, rerun the failed jobs of that push's CI run.
+CI uploads the verified IPK, checksum and feed as workflow artifacts. The dormant publication
+job keeps its checks for published builds, drafts and tags pointing to a different commit.
+The future release owner is `davidsantanaalves/luma-evolution`.
 
 To build a numbered IPK locally, run `node tools/build-number.mjs --apply` before `pnpm build`
 and `node tools/package.mjs`, then restore the versioned files with `git checkout -- package.json
@@ -1143,20 +1154,9 @@ Key modules: `state.rs` focus/preferences, `view.rs` geometry, `renderer.rs` GPU
 `homeKeyVerified` therefore remains `null` (unknown). LG Home can be an overlay, so foreground app
 identity alone is not sufficient evidence that Luma rendered or received the Home key.
 
-If diagnostics on the affected TV establish that Home opens `com.webos.app.fullhome`, disable
-existing takeover first, then explicitly select that target:
-
-```sh
-sh /var/lib/luma-home/home.sh disable
-sh /media/developer/apps/usr/palm/applications/com.eluz1ve.lumaplus/home.sh enable /media/developer/apps/usr/palm/applications/com.eluz1ve.lumaplus com.webos.app.fullhome
-```
-
-Use the installed package directory on production installations. The selected target is saved
-for boot, package reapply and restore; no input remapping or Linux key-code assumption is used.
-The original `home` target remains the default. Press Home from another app to verify, then test
-disable restores LG's dashboard. This is a targeted compatibility option, not confirmation of
-the unreported cause of #109. The reporter's device still needs to establish which Home app
-receives the key. Do not infer support for webOS 4 from this option.
+The retained implementation supports explicitly selecting `com.webos.app.fullhome` if
+firmware routes the Home key there. The selection is simulated in the helper tests while
+activation remains disabled.
 
 ## Custom Home focus prototype
 
@@ -1179,10 +1179,8 @@ root-side LS2 operations; Node is no longer required by these helpers or by `tv/
 which reads its two JSON fields with POSIX tools.
 
 `home.sh` retains its explicit confirmation and filesystem lock. Enabling Home copies both that
-script and the native helper into `/var/lib/luma-home`, so recovery remains available after the
-source package is removed. When upgrading an existing integration from the interpreter helper,
-run the packaged `home.sh enable` again to replace its copied recovery/boot files. Configurations
-from the former scripts keep their method, installation and original stock manifest. Both `home`
+script and the native helper into `/var/lib/luma-evolution-home`, so recovery remains available after the
+source package is removed. Evolution has its own state and does not import the upstream configuration. Both `home`
 and `fullhome` executable targets are supported; the latter requires matching native lifecycle
 support from #142. Manifest takeover remains limited to webOS
 10/11. The optional `tv-input` subcommand implements the #124 registration/verification contract;

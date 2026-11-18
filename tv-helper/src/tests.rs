@@ -9,7 +9,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
-const DIR: &str = "/media/developer/apps/usr/palm/applications/com.eluz1ve.lumaplus";
+const DIR: &str = "/media/developer/apps/usr/palm/applications/com.davidsantana.lumaevolution";
 const EXE: &str = "/usr/bin/com.webos.app.home";
 
 #[test]
@@ -112,6 +112,7 @@ struct Fixture {
     /// Other apps SAM reports as running, and the version LG's installer installs next.
     running_apps: RefCell<Vec<String>>,
     installs: RefCell<Option<String>>,
+    install_bytes: RefCell<Vec<u8>>,
     /// The TV's system settings, as the settings service answers them.
     settings: RefCell<BTreeMap<String, String>>,
 }
@@ -145,10 +146,11 @@ impl Fixture {
             stuck: Cell::new(false),
             running_apps: RefCell::new(vec![]),
             installs: RefCell::new(None),
+            install_bytes: RefCell::new(Vec::new()),
             settings: RefCell::new(BTreeMap::new()),
         };
         for dir in [
-            "/var/lib/luma-home/app",
+            "/var/lib/luma-evolution-home/app",
             "/var/lib/webosbrew/init.d",
             "/var/run",
             "/proc/self",
@@ -330,6 +332,7 @@ impl System for Fixture {
                     system::exists(self, package),
                     "installer reads the root-owned copy"
                 );
+                *self.install_bytes.borrow_mut() = self.read(package);
                 if let Some(version) = self.installs.borrow_mut().take() {
                     self.put_json(
                         &format!("{}/{id}/appinfo.json", crate::app_update::APPS),
@@ -432,13 +435,15 @@ fn home_methods_reject_unknown_firmware_or_lifecycle() {
 #[test]
 fn only_luma_mounts_are_owned_even_after_package_replacement() {
     for root in [
-        "/developer/apps/usr/palm/applications/com.eluz1ve.lumaplus/luma",
-        "/cryptofs/apps/usr/palm/applications/com.eluz1ve.lumaplus/luma//deleted",
+        "/developer/apps/usr/palm/applications/com.davidsantana.lumaevolution/luma",
+        "/cryptofs/apps/usr/palm/applications/com.davidsantana.lumaevolution/luma//deleted",
     ] {
         assert!(home::exe_owned(root));
     }
     assert!(!home::exe_owned("/var/lib/other/launcher"));
-    assert!(!home::exe_owned("/com.eluz1ve.lumaplus/luma/../other"));
+    assert!(!home::exe_owned(
+        "/com.davidsantana.lumaevolution/luma/../other"
+    ));
 }
 #[test]
 fn executable_apply_mounts_marks_and_launches_then_restore_unmounts() {
@@ -447,32 +452,35 @@ fn executable_apply_mounts_marks_and_launches_then_restore_unmounts() {
     let c = f.config("executable", home::HOME);
     h.apply(&c, true).unwrap();
     assert!(system::same_file(&f, EXE, format!("{DIR}/luma")));
-    assert_eq!(f.read("/var/run/luma-home"), format!("{APP}\n").as_bytes());
+    assert_eq!(
+        f.read("/var/run/luma-evolution-home"),
+        format!("{APP}\n").as_bytes()
+    );
     assert_eq!(f.front.borrow().as_str(), home::HOME);
     h.restore(&c).unwrap();
-    assert!(!system::exists(&f, "/var/run/luma-home"));
+    assert!(!system::exists(&f, "/var/run/luma-evolution-home"));
     assert_eq!(f.read(EXE), format!("stock-{}", home::HOME).as_bytes());
 }
 #[test]
 fn fullhome_round_trip_and_persisted_target_keep_their_identity() {
     let f = Fixture::new();
-    home::dispatch(&f, "enable", Some(DIR), Some(home::FULL_HOME)).unwrap();
+    home::dispatch_integration(&f, "enable", Some(DIR), Some(home::FULL_HOME)).unwrap();
     let c = home::load(&f).unwrap().unwrap();
     assert_eq!(c.home_id, home::FULL_HOME);
     assert!(c.enabled);
     assert_eq!(
-        f.read("/var/run/luma-home-target"),
+        f.read("/var/run/luma-evolution-home-target"),
         format!("{}\n", home::FULL_HOME).as_bytes()
     );
-    let status = home::dispatch(&f, "status", None, None).unwrap();
+    let status = home::dispatch_integration(&f, "status", None, None).unwrap();
     assert_eq!(status["homeId"], home::FULL_HOME);
     assert_eq!(status["mounted"], true);
-    home::dispatch(&f, "disable", None, None).unwrap();
+    home::dispatch_integration(&f, "disable", None, None).unwrap();
     assert_eq!(
         f.read("/usr/bin/com.webos.app.fullhome"),
         b"stock-com.webos.app.fullhome"
     );
-    assert!(!system::exists(&f, "/var/run/luma-home-target"));
+    assert!(!system::exists(&f, "/var/run/luma-evolution-home-target"));
 }
 #[test]
 fn installation_under_a_symlinked_temporary_parent_stays_inside_the_root() {
@@ -483,9 +491,9 @@ fn installation_under_a_symlinked_temporary_parent_stays_inside_the_root() {
     std::os::unix::fs::symlink(&real, &link).unwrap();
     {
         let f = Fixture::under(&link);
-        home::dispatch(&f, "enable", Some(DIR), None).unwrap();
+        home::dispatch_integration(&f, "enable", Some(DIR), None).unwrap();
         assert_eq!(home::load(&f).unwrap().unwrap().app_dir, DIR);
-        home::dispatch(&f, "disable", None, None).unwrap();
+        home::dispatch_integration(&f, "disable", None, None).unwrap();
     }
     fs::remove_file(&link).unwrap();
     fs::remove_dir_all(&real).unwrap();
@@ -493,10 +501,13 @@ fn installation_under_a_symlinked_temporary_parent_stays_inside_the_root() {
 #[test]
 fn copied_recovery_binary_and_shell_survive_package_removal() {
     let f = Fixture::new();
-    home::dispatch(&f, "enable", Some(DIR), None).unwrap();
-    assert_eq!(f.read("/var/lib/luma-home/luma-helper"), b"native-helper");
+    home::dispatch_integration(&f, "enable", Some(DIR), None).unwrap();
+    assert_eq!(
+        f.read("/var/lib/luma-evolution-home/luma-helper"),
+        b"native-helper"
+    );
     fs::remove_dir_all(f.p(DIR)).unwrap();
-    home::dispatch(&f, "disable", None, None).unwrap();
+    home::dispatch_integration(&f, "disable", None, None).unwrap();
     assert_eq!(f.read(EXE), b"stock-com.webos.app.home");
 }
 #[test]
@@ -547,7 +558,7 @@ fn failed_launch_retries_once_then_restores_stock_files() {
             .contains("did not come")
     );
     assert_eq!(f.read(EXE), b"stock-com.webos.app.home");
-    assert!(!system::exists(&f, "/var/run/luma-home"));
+    assert!(!system::exists(&f, "/var/run/luma-evolution-home"));
     assert_eq!(
         f.calls().iter().filter(|s| s.contains("/launch ")).count(),
         2
@@ -557,7 +568,7 @@ fn failed_launch_retries_once_then_restores_stock_files() {
 fn manifest_home_is_launched_again_when_sam_swallows_the_first_launch() {
     let f = Fixture::new();
     f.put("/etc/starfish-release", b"Rockhopper release 10.3.1");
-    home::dispatch(&f, "enable", Some(DIR), None).unwrap();
+    home::dispatch_integration(&f, "enable", Some(DIR), None).unwrap();
     let h = home::Home::new(&f, home::HOME).unwrap();
     let c = home::load(&f).unwrap().unwrap();
     assert_eq!(c.method, "manifest");
@@ -576,7 +587,7 @@ fn manifest_home_is_launched_again_when_sam_swallows_the_first_launch() {
 fn manifest_home_keeps_the_takeover_when_another_app_holds_the_screen() {
     let f = Fixture::new();
     f.put("/etc/starfish-release", b"Rockhopper release 10.3.1");
-    home::dispatch(&f, "enable", Some(DIR), None).unwrap();
+    home::dispatch_integration(&f, "enable", Some(DIR), None).unwrap();
     let h = home::Home::new(&f, home::HOME).unwrap();
     let c = home::load(&f).unwrap().unwrap();
     *f.front.borrow_mut() = "other.app".into();
@@ -593,7 +604,7 @@ fn manifest_home_keeps_the_takeover_when_another_app_holds_the_screen() {
 fn manifest_home_restores_lg_home_when_sam_refuses_every_launch() {
     let f = Fixture::new();
     f.put("/etc/starfish-release", b"Rockhopper release 10.3.1");
-    home::dispatch(&f, "enable", Some(DIR), None).unwrap();
+    home::dispatch_integration(&f, "enable", Some(DIR), None).unwrap();
     let h = home::Home::new(&f, home::HOME).unwrap();
     let c = home::load(&f).unwrap().unwrap();
     *f.front.borrow_mut() = "other.app".into();
@@ -638,21 +649,21 @@ fn busy_mounts_use_lazy_unmount_and_restore_reports_stuck_processes() {
 #[test]
 fn changing_an_enabled_target_or_using_a_foreign_hook_is_rejected() {
     let f = Fixture::new();
-    home::dispatch(&f, "enable", Some(DIR), None).unwrap();
+    home::dispatch_integration(&f, "enable", Some(DIR), None).unwrap();
     assert!(
-        home::dispatch(&f, "enable", Some(DIR), Some(home::FULL_HOME))
+        home::dispatch_integration(&f, "enable", Some(DIR), Some(home::FULL_HOME))
             .unwrap_err()
             .contains("Disable")
     );
-    home::dispatch(&f, "disable", None, None).unwrap();
+    home::dispatch_integration(&f, "disable", None, None).unwrap();
     system::link(
         &f,
         "/other/home.sh",
-        "/var/lib/webosbrew/init.d/64-luma-home",
+        "/var/lib/webosbrew/init.d/64-luma-evolution-home",
     )
     .unwrap();
     assert!(
-        home::dispatch(&f, "enable", Some(DIR), None)
+        home::dispatch_integration(&f, "enable", Some(DIR), None)
             .unwrap_err()
             .contains("already in use")
     );
@@ -661,7 +672,7 @@ fn changing_an_enabled_target_or_using_a_foreign_hook_is_rejected() {
 fn old_configuration_without_method_or_target_is_readable() {
     let f = Fixture::new();
     f.put_json(
-        "/var/lib/luma-home/state.json",
+        "/var/lib/luma-evolution-home/state.json",
         json!({"enabled":false,"appDir":DIR,"stock":stock(home::HOME),"futureFlag":42}),
     );
     let c = home::load(&f).unwrap().unwrap();
@@ -673,12 +684,12 @@ fn old_configuration_without_method_or_target_is_readable() {
 fn manifest_takeover_rereads_staged_metadata_and_restores_the_stock_manifest() {
     let f = Fixture::new();
     f.put("/etc/starfish-release", b"Rockhopper release 11.2.0");
-    home::dispatch(&f, "enable", Some(DIR), None).unwrap();
+    home::dispatch_integration(&f, "enable", Some(DIR), None).unwrap();
     assert_eq!(
         system::json(&f, "/usr/palm/applications/com.webos.app.home/appinfo.json").unwrap()["main"],
         "luma"
     );
-    home::dispatch(&f, "disable", None, None).unwrap();
+    home::dispatch_integration(&f, "disable", None, None).unwrap();
     assert_eq!(
         system::json(&f, "/usr/palm/applications/com.webos.app.home/appinfo.json").unwrap()["main"],
         format!("file://{EXE}")
@@ -689,7 +700,7 @@ fn release_is_attempted_even_when_the_block_request_times_out() {
     let f = Fixture::new();
     f.put("/etc/starfish-release", b"Rockhopper release 11.2.0");
     f.reply("blockSystemApp", Err("timeout after block".into()));
-    assert!(home::dispatch(&f, "enable", Some(DIR), None).is_err());
+    assert!(home::dispatch_integration(&f, "enable", Some(DIR), None).is_err());
     assert!(
         f.calls()
             .iter()
@@ -705,7 +716,7 @@ fn release_is_attempted_even_when_the_block_request_times_out() {
 fn normal_tile_is_closed_by_app_id_and_an_exiting_instance_is_tolerated() {
     let f = Fixture::new();
     f.normal.set(true);
-    home::dispatch(&f, "enable", Some(DIR), None).unwrap();
+    home::dispatch_integration(&f, "enable", Some(DIR), None).unwrap();
     assert!(
         f.calls()
             .iter()
@@ -718,7 +729,7 @@ fn normal_close_denials_and_stuck_instances_prevent_mounting() {
     let f = Fixture::new();
     f.normal.set(true);
     f.close_normal.set(false);
-    assert!(home::dispatch(&f, "enable", Some(DIR), None).is_err());
+    assert!(home::dispatch_integration(&f, "enable", Some(DIR), None).is_err());
     assert!(f.mounts.borrow().is_empty());
 }
 #[test]
@@ -851,13 +862,16 @@ fn invalid_ids_and_unrelated_manifests_cannot_select_private_artwork() {
 fn splash_updates_tile_and_only_the_enabled_own_manifest_stage() {
     let f = Fixture::new();
     f.put_json(
-        "/var/lib/luma-home/state.json",
+        "/var/lib/luma-evolution-home/state.json",
         json!({"enabled":true,"method":"manifest","appDir":DIR}),
     );
-    f.put("/var/lib/luma-home/app/splash.png", b"old");
+    f.put("/var/lib/luma-evolution-home/app/splash.png", b"old");
     files::sync_splash(&f, Path::new(DIR), "forest").unwrap();
     assert_eq!(f.read(&format!("{DIR}/splash.png")), b"forest");
-    assert_eq!(f.read("/var/lib/luma-home/app/splash.png"), b"forest");
+    assert_eq!(
+        f.read("/var/lib/luma-evolution-home/app/splash.png"),
+        b"forest"
+    );
     let before = fs::metadata(f.p(&format!("{DIR}/splash.png")))
         .unwrap()
         .modified()
@@ -879,10 +893,13 @@ fn executable_other_or_disabled_stages_are_never_written() {
         json!({"enabled":true,"appDir":"/other/install"}),
     ] {
         let f = Fixture::new();
-        f.put_json("/var/lib/luma-home/state.json", c);
-        f.put("/var/lib/luma-home/app/splash.png", b"old");
+        f.put_json("/var/lib/luma-evolution-home/state.json", c);
+        f.put("/var/lib/luma-evolution-home/app/splash.png", b"old");
         files::sync_splash(&f, Path::new(DIR), "prism").unwrap();
-        assert_eq!(f.read("/var/lib/luma-home/app/splash.png"), b"old");
+        assert_eq!(
+            f.read("/var/lib/luma-evolution-home/app/splash.png"),
+            b"old"
+        );
     }
 }
 #[test]
@@ -892,7 +909,14 @@ fn missing_or_invalid_splash_sources_preserve_previous_images() {
         assert!(files::sync_splash(&f, Path::new(DIR), background).is_err());
         assert_eq!(f.read(&format!("{DIR}/splash.png")), b"default");
     }
-    assert!(files::sync_splash(&f, Path::new("/tmp/com.eluz1ve.lumaplus"), "forest").is_err());
+    assert!(
+        files::sync_splash(
+            &f,
+            Path::new("/tmp/com.davidsantana.lumaevolution"),
+            "forest"
+        )
+        .is_err()
+    );
 }
 #[test]
 fn failed_atomic_write_cleans_its_private_temporary_file() {
@@ -915,7 +939,10 @@ fn stage_uses_persistent_selection_and_retains_manual_background_over_rotation()
         json!({"background":"prism","splash_background":"forest"}),
     );
     files::stage_splash(&f, Path::new(DIR)).unwrap();
-    assert_eq!(f.read("/var/lib/luma-home/app/splash.png"), b"forest");
+    assert_eq!(
+        f.read("/var/lib/luma-evolution-home/app/splash.png"),
+        b"forest"
+    );
 }
 #[test]
 fn null_manual_selection_falls_back_to_saved_background() {
@@ -925,7 +952,10 @@ fn null_manual_selection_falls_back_to_saved_background() {
         json!({"background":"prism","splash_background":null}),
     );
     files::stage_splash(&f, Path::new(DIR)).unwrap();
-    assert_eq!(f.read("/var/lib/luma-home/app/splash.png"), b"prism");
+    assert_eq!(
+        f.read("/var/lib/luma-evolution-home/app/splash.png"),
+        b"prism"
+    );
 }
 #[test]
 fn malformed_missing_and_unavailable_preferences_use_package_splash() {
@@ -942,7 +972,8 @@ fn malformed_missing_and_unavailable_preferences_use_package_splash() {
         );
         files::stage_splash(&f, Path::new(DIR)).unwrap();
         assert!(matches!(
-            f.read("/var/lib/luma-home/app/splash.png").as_slice(),
+            f.read("/var/lib/luma-evolution-home/app/splash.png")
+                .as_slice(),
             b"dunes" | b"default"
         ));
     }
@@ -957,7 +988,10 @@ fn symlink_storage_directories_are_not_used_as_root_preferences() {
         json!({"background":"forest"}),
     );
     files::stage_splash(&f, Path::new(DIR)).unwrap();
-    assert_eq!(f.read("/var/lib/luma-home/app/splash.png"), b"forest");
+    assert_eq!(
+        f.read("/var/lib/luma-evolution-home/app/splash.png"),
+        b"forest"
+    );
 }
 
 #[test]
@@ -1044,7 +1078,7 @@ fn input_verification_failure_rolls_back_and_existing_registration_is_preserved(
 fn root_mutations_reject_non_root_callers() {
     let f = Fixture::new();
     f.uid.set(1000);
-    assert!(home::dispatch(&f, "enable", Some(DIR), None).is_err());
+    assert!(home::dispatch_integration(&f, "enable", Some(DIR), None).is_err());
     assert!(input::configure(&f, "enable", Path::new(DIR)).is_err());
     assert!(f.calls().is_empty());
 }
@@ -1094,7 +1128,7 @@ fn a_stuck_home_process_is_reported_after_unmount_recovery() {
         .unwrap_err();
     assert!(error.contains("Restore also failed"));
     assert_eq!(f.read(EXE), b"stock-com.webos.app.home");
-    assert!(!system::exists(&f, "/var/run/luma-home"));
+    assert!(!system::exists(&f, "/var/run/luma-evolution-home"));
 }
 #[test]
 fn accepted_close_waits_boundedly_and_a_close_race_can_succeed() {
@@ -1102,7 +1136,7 @@ fn accepted_close_waits_boundedly_and_a_close_race_can_succeed() {
     f.normal.set(true);
     f.reply("closeByAppId", Ok(json!({"returnValue":true})));
     assert!(
-        home::dispatch(&f, "enable", Some(DIR), None)
+        home::dispatch_integration(&f, "enable", Some(DIR), None)
             .unwrap_err()
             .contains("Close Luma")
     );
@@ -1115,7 +1149,7 @@ fn accepted_close_waits_boundedly_and_a_close_race_can_succeed() {
     );
     f.reply("running", Ok(json!({"returnValue":true,"running":[]})));
     f.reply("closeByAppId", Ok(json!({"returnValue":false})));
-    home::dispatch(&f, "enable", Some(DIR), None).unwrap();
+    home::dispatch_integration(&f, "enable", Some(DIR), None).unwrap();
 }
 #[test]
 fn developer_and_production_splash_precedence_matches_native_storage() {
@@ -1129,11 +1163,17 @@ fn developer_and_production_splash_precedence_matches_native_storage() {
         json!({"background":"prism"}),
     );
     files::stage_splash(&f, Path::new(DIR)).unwrap();
-    assert_eq!(f.read("/var/lib/luma-home/app/splash.png"), b"forest");
+    assert_eq!(
+        f.read("/var/lib/luma-evolution-home/app/splash.png"),
+        b"forest"
+    );
     let production = format!("/media/cryptofs/apps/usr/palm/applications/{APP}");
     f.put(&format!("{production}/splash/prism.png"), b"prism");
     files::stage_splash(&f, Path::new(&production)).unwrap();
-    assert_eq!(f.read("/var/lib/luma-home/app/splash.png"), b"prism");
+    assert_eq!(
+        f.read("/var/lib/luma-evolution-home/app/splash.png"),
+        b"prism"
+    );
 }
 #[test]
 fn persistent_preferences_win_over_package_local_migration_and_active_stages_refresh() {
@@ -1147,7 +1187,7 @@ fn persistent_preferences_win_over_package_local_migration_and_active_stages_ref
         &format!("/media/developer/{APP}/preferences.json"),
         json!({"background":"forest"}),
     );
-    home::dispatch(&f, "enable", Some(DIR), None).unwrap();
+    home::dispatch_integration(&f, "enable", Some(DIR), None).unwrap();
     assert_eq!(
         f.read("/usr/palm/applications/com.webos.app.home/splash.png"),
         b"forest"
@@ -1156,24 +1196,135 @@ fn persistent_preferences_win_over_package_local_migration_and_active_stages_ref
         &format!("/media/developer/{APP}/preferences.json"),
         json!({"background":"prism"}),
     );
-    home::dispatch(&f, "apply", None, None).unwrap();
+    home::dispatch_integration(&f, "apply", None, None).unwrap();
     assert_eq!(
         f.read("/usr/palm/applications/com.webos.app.home/splash.png"),
         b"prism"
     );
 }
+#[test]
+fn foundation_takeover_commands_leave_upstream_state_and_hooks_alone() {
+    let f = Fixture::new();
+    let paths = [
+        "/var/lib/luma-home/state.json",
+        "/var/lib/luma-update/result.json",
+        "/var/run/luma-home",
+        "/tmp/luma-home.alive",
+        "/var/lib/webosbrew/init.d/64-luma-home",
+        "/var/lib/webosbrew/init.d/65-luma",
+    ];
+    for path in paths {
+        f.put(path, b"upstream");
+    }
+    for command in ["enable", "apply", "disable", "restore", "watch"] {
+        let error = home::dispatch(&f, command, Some(DIR), None).unwrap_err();
+        assert!(error.contains("takeover is disabled"));
+    }
+    assert_eq!(
+        home::dispatch(&f, "status", None, None).unwrap()["enabled"],
+        false
+    );
+    assert!(f.calls().is_empty());
+    for path in paths {
+        assert_eq!(f.read(path), b"upstream");
+    }
+}
+
 mod app_update_tests {
     use super::*;
     use crate::app_update;
+    use std::io::Write;
+
     const MOON: &str = "com.limelight.webos";
-    const PACKAGE: &[u8] = b"moonlight 1.6.37 package";
-    // sha256 of PACKAGE
-    fn sha() -> String {
-        ring::digest::digest(&ring::digest::SHA256, PACKAGE)
+
+    const VERSION: &str = "1.6.37";
+
+    fn control(id: &str, version: &str) -> String {
+        format!("Package: {id}\nVersion: {version}\nArchitecture: arm\n")
+    }
+
+    fn entry(name: &str, contents: &[u8], kind: u8) -> Vec<u8> {
+        let mut tar = vec![0; 512 + contents.len().div_ceil(512) * 512];
+        tar[..name.len()].copy_from_slice(name.as_bytes());
+        tar[100..108].copy_from_slice(if kind == b'5' {
+            b"0040777\0"
+        } else {
+            b"0100644\0"
+        });
+        tar[124..136].copy_from_slice(format!("{:011o}\0", contents.len()).as_bytes());
+        tar[156] = kind;
+        tar[257..265].copy_from_slice(b"ustar\0\x30\x30");
+        if name == "./control" {
+            tar[476..500].copy_from_slice(b"15277307247\x0015277307247\0");
+        }
+        tar[148..156].fill(b' ');
+        let sum = tar[..512].iter().map(|&byte| u32::from(byte)).sum::<u32>();
+        tar[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+        tar[512..512 + contents.len()].copy_from_slice(contents);
+        tar
+    }
+
+    fn manifest(id: &str, version: &str) -> Vec<u8> {
+        entry(
+            &format!("usr/palm/applications/{id}/appinfo.json"),
+            json!({"id":id,"version":version,"type":"native","main":"luma"})
+                .to_string()
+                .as_bytes(),
+            b'0',
+        )
+    }
+
+    fn package_bytes(controls: &[Vec<u8>], files: &[Vec<u8>]) -> Vec<u8> {
+        fn append(ipk: &mut Vec<u8>, name: &str, bytes: &[u8]) {
+            let header = format!(
+                "{name:<16}{:<12}{:<6}{:<6}{:<8}{:<10}\x60\n",
+                0,
+                0,
+                0,
+                100644,
+                bytes.len()
+            );
+            ipk.extend_from_slice(header.as_bytes());
+            ipk.extend_from_slice(bytes);
+            if !bytes.len().is_multiple_of(2) {
+                ipk.push(b'\n');
+            }
+        }
+        fn tar(entries: &[Vec<u8>]) -> Vec<u8> {
+            let mut gzip =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            for entry in entries {
+                gzip.write_all(entry).unwrap();
+            }
+            gzip.write_all(&[0; 1024]).unwrap();
+            gzip.finish().unwrap()
+        }
+        let mut ipk = b"!<arch>\n".to_vec();
+        append(&mut ipk, "debian-binary", b"2.0\n");
+        append(&mut ipk, "control.tar.gz/", &tar(controls));
+        append(&mut ipk, "data.tar.gz/", &tar(files));
+        ipk
+    }
+
+    fn package(id: &str) -> Vec<u8> {
+        package_bytes(
+            &[entry("./control", control(id, VERSION).as_bytes(), b'0')],
+            &[
+                entry(&format!("usr/palm/applications/{id}/"), b"", b'5'),
+                manifest(id, VERSION),
+            ],
+        )
+    }
+
+    fn package_sha(bytes: &[u8]) -> String {
+        ring::digest::digest(&ring::digest::SHA256, bytes)
             .as_ref()
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect()
+    }
+    fn sha() -> String {
+        package_sha(&package(MOON))
     }
     fn tv() -> Fixture {
         let f = Fixture::new();
@@ -1181,7 +1332,7 @@ mod app_update_tests {
             &format!("{}/{MOON}/appinfo.json", app_update::APPS),
             json!({"id":MOON,"version":"1.6.36"}),
         );
-        f.put("/tmp/luma-update-x/package.ipk", PACKAGE);
+        f.put("/tmp/luma-evolution-update-x/package.ipk", &package(MOON));
         f
     }
     fn update(f: &Fixture, id: &str, version: &str, sha: &str) -> Result<Value> {
@@ -1190,7 +1341,7 @@ mod app_update_tests {
             id,
             version,
             sha,
-            Path::new("/tmp/luma-update-x/package.ipk"),
+            Path::new("/tmp/luma-evolution-update-x/package.ipk"),
         )
     }
     #[test]
@@ -1204,12 +1355,15 @@ mod app_update_tests {
             f.calls()
                 .iter()
                 .any(|c| c.contains("appInstallService/dev/install")
-                    && c.contains("/var/lib/luma-update/apps/com.limelight.webos.ipk"))
+                    && c.contains(
+                        "/var/lib/luma-evolution-update/apps/com.limelight.webos_1.6.37_arm.ipk"
+                    ))
         );
+        assert_eq!(*f.install_bytes.borrow(), package(MOON));
         // The copy is gone afterwards; an already current app is left alone.
         assert!(!system::exists(
             &f,
-            "/var/lib/luma-update/apps/com.limelight.webos.ipk"
+            "/var/lib/luma-evolution-update/apps/com.limelight.webos_1.6.37_arm.ipk"
         ));
         assert_eq!(
             update(&f, MOON, "1.6.37", &sha()).unwrap()["changed"],
@@ -1225,8 +1379,168 @@ mod app_update_tests {
         assert_eq!(app_update::installed_version(&f, MOON).unwrap(), "1.6.36");
         assert!(!system::exists(
             &f,
-            "/var/lib/luma-update/apps/com.limelight.webos.ipk"
+            "/var/lib/luma-evolution-update/apps/com.limelight.webos_1.6.37_arm.ipk"
         ));
+    }
+    #[test]
+    fn an_upstream_ipk_with_a_valid_checksum_cannot_be_installed_under_another_id() {
+        let f = tv();
+        let bytes = package(crate::LUMA_PLUS);
+        f.put("/tmp/luma-evolution-update-x/package.ipk", &bytes);
+        let error = update(&f, MOON, "1.6.37", &package_sha(&bytes)).unwrap_err();
+        assert!(error.contains("identity"));
+        assert!(!f.calls().iter().any(|call| call.contains("dev/install")));
+        assert!(crate::ipk::verify(&bytes, APP, VERSION).is_err());
+    }
+    #[test]
+    fn ambiguous_or_conflicting_ipks_never_reach_the_installer_even_with_a_valid_checksum() {
+        let f = tv();
+        let control_ok = entry("./control", control(MOON, VERSION).as_bytes(), b'0');
+        let own = manifest(MOON, VERSION);
+        let wrong = control(crate::LUMA_PLUS, VERSION);
+        let app = format!("usr/palm/applications/{MOON}");
+        let cases = [
+            package_bytes(
+                &[control_ok.clone(), entry("control", wrong.as_bytes(), b'0')],
+                std::slice::from_ref(&own),
+            ),
+            package_bytes(
+                &[
+                    control_ok.clone(),
+                    entry("././control", wrong.as_bytes(), b'0'),
+                ],
+                std::slice::from_ref(&own),
+            ),
+            package_bytes(
+                &[entry("control", control(MOON, "9.0.0").as_bytes(), b'0')],
+                std::slice::from_ref(&own),
+            ),
+            package_bytes(
+                &[control_ok.clone(), entry("postinst", b"#!/bin/sh\n", b'0')],
+                std::slice::from_ref(&own),
+            ),
+            package_bytes(
+                std::slice::from_ref(&control_ok),
+                &[own.clone(), manifest(crate::LUMA_PLUS, VERSION)],
+            ),
+            package_bytes(
+                std::slice::from_ref(&control_ok),
+                &[own.clone(), manifest(MOON, "9.0.0")],
+            ),
+            package_bytes(
+                std::slice::from_ref(&control_ok),
+                &[manifest(MOON, "9.0.0")],
+            ),
+            package_bytes(
+                std::slice::from_ref(&control_ok),
+                &[own.clone(), entry(&format!("{app}/../foreign"), b"", b'0')],
+            ),
+            package_bytes(
+                std::slice::from_ref(&control_ok),
+                &[own.clone(), entry("/etc/shadow", b"", b'0')],
+            ),
+            package_bytes(
+                std::slice::from_ref(&control_ok),
+                &[own.clone(), entry(&format!("{app}/symbolic"), b"", b'2')],
+            ),
+            package_bytes(
+                std::slice::from_ref(&control_ok),
+                &[own.clone(), entry(&format!("{app}/hardlink"), b"", b'1')],
+            ),
+            package_bytes(
+                std::slice::from_ref(&control_ok),
+                &[
+                    own.clone(),
+                    entry(&format!("{app}/appinfo.json/nested"), b"", b'0'),
+                ],
+            ),
+            package_bytes(
+                std::slice::from_ref(&control_ok),
+                &[
+                    own.clone(),
+                    entry("PaxHeader", b"20 path=/etc/shadow\n", b'x'),
+                ],
+            ),
+        ];
+        for (index, bytes) in cases.into_iter().enumerate() {
+            f.put("/tmp/luma-evolution-update-x/package.ipk", &bytes);
+            assert!(
+                update(&f, MOON, VERSION, &package_sha(&bytes)).is_err(),
+                "fixture {index}"
+            );
+        }
+        assert!(!f.calls().iter().any(|call| call.contains("dev/install")));
+        assert_eq!(app_update::installed_version(&f, MOON).unwrap(), "1.6.36");
+    }
+    #[test]
+    fn evolution_verifies_its_package_manifest_and_rejects_crlf_scripts() {
+        let root = format!("usr/palm/applications/{APP}");
+        let package_path = format!("usr/palm/packages/{APP}/packageinfo.json");
+        let control = entry("control", control(APP, VERSION).as_bytes(), b'0');
+        for (breaks, valid) in [("\n", true), ("\r\n", false)] {
+            let files = [
+                manifest(APP, VERSION),
+                entry(
+                    &package_path,
+                    json!({"id":APP,"version":VERSION,"app":APP})
+                        .to_string()
+                        .as_bytes(),
+                    b'0',
+                ),
+                entry(
+                    &format!("{root}/home.sh"),
+                    format!("#!/bin/sh{breaks}exit 0{breaks}").as_bytes(),
+                    b'0',
+                ),
+                entry(
+                    &format!("{root}/autostart.sh"),
+                    b"#!/bin/sh\nexit 0\n",
+                    b'0',
+                ),
+            ];
+            let bytes = package_bytes(std::slice::from_ref(&control), &files);
+            assert_eq!(crate::ipk::verify(&bytes, APP, VERSION).is_ok(), valid);
+        }
+    }
+    #[test]
+    fn homebrew_packages_can_update_only_their_declared_services() {
+        let control = entry("control", control(MOON, VERSION).as_bytes(), b'0');
+        let service = format!("{MOON}.service");
+        let mut files = vec![
+            manifest(MOON, VERSION),
+            entry(
+                &format!("usr/palm/packages/{MOON}/packageinfo.json"),
+                json!({"id":MOON,"version":VERSION,"app":MOON,"services":[service]})
+                    .to_string()
+                    .as_bytes(),
+                b'0',
+            ),
+        ];
+        for (name, valid) in [(service.as_str(), true), ("com.webos.app.home", false)] {
+            files.push(entry(
+                &format!("usr/palm/services/{service}/services.json"),
+                json!({"id":service,"services":[{"name":name}]})
+                    .to_string()
+                    .as_bytes(),
+                b'0',
+            ));
+            let bytes = package_bytes(std::slice::from_ref(&control), &files);
+            assert_eq!(crate::ipk::verify(&bytes, MOON, VERSION).is_ok(), valid);
+            files.pop();
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn an_unsafe_staging_directory_is_refused_before_the_installer() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let f = tv();
+        let path = f.p("/var/lib/luma-evolution-update");
+        fs::create_dir(&path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o777)).unwrap();
+        let error = update(&f, MOON, VERSION, &sha()).unwrap_err();
+        assert!(error.contains("Unsafe IPK staging directory"));
+        assert!(!f.calls().iter().any(|call| call.contains("dev/install")));
     }
     #[test]
     fn running_excluded_or_foreign_apps_are_not_updated() {
@@ -1237,10 +1551,31 @@ mod app_update_tests {
                 .unwrap_err()
                 .contains("running")
         );
-        for id in [APP, "org.webosbrew.hbchannel", "../etc", "netflix"] {
+        for id in [
+            APP,
+            crate::LUMA_PLUS,
+            "com.ecklf.luma",
+            "org.webosbrew.hbchannel",
+            "com.webos.app.home",
+            "com.webos.app.fullhome",
+            "../etc",
+            "netflix",
+        ] {
             assert!(update(&f, id, "1.6.37", &sha()).is_err(), "{id}");
         }
         assert!(!f.calls().iter().any(|c| c.contains("dev/install")));
+    }
+    #[test]
+    fn verified_packages_cannot_downgrade_the_installed_app() {
+        let f = tv();
+        let bytes = package_bytes(
+            &[entry("control", control(MOON, "1.6.35").as_bytes(), b'0')],
+            &[manifest(MOON, "1.6.35")],
+        );
+        f.put("/tmp/luma-evolution-update-x/package.ipk", &bytes);
+        let error = update(&f, MOON, "1.6.35", &package_sha(&bytes)).unwrap_err();
+        assert!(error.contains("older"));
+        assert!(!f.calls().iter().any(|call| call.contains("dev/install")));
     }
     #[test]
     fn malformed_requests_and_non_root_callers_are_refused() {
@@ -1273,16 +1608,16 @@ mod app_update_tests {
 fn a_cold_start_holds_lgs_home_auto_launch_off_and_opens_luma_itself() {
     let f = Fixture::new();
     f.put("/etc/starfish-release", b"Rockhopper release 11.2.0");
-    home::dispatch(&f, "enable", Some(DIR), None).unwrap();
+    home::dispatch_integration(&f, "enable", Some(DIR), None).unwrap();
     f.settings.borrow_mut().extend([
         ("quickStartMode".to_owned(), "off".to_owned()),
         ("homeAutoLaunch".to_owned(), "on".to_owned()),
     ]);
     *f.front.borrow_mut() = "com.webos.app.livetv".into();
     f.calls.borrow_mut().clear();
-    home::dispatch(&f, "apply", None, None).unwrap();
+    home::dispatch_integration(&f, "apply", None, None).unwrap();
     assert_eq!(f.settings.borrow()["homeAutoLaunch"], "off");
     assert!(f.calls.borrow().iter().any(|c| c.contains("/launch")));
-    home::dispatch(&f, "disable", None, None).unwrap();
+    home::dispatch_integration(&f, "disable", None, None).unwrap();
     assert_eq!(f.settings.borrow()["homeAutoLaunch"], "on");
 }

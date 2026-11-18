@@ -42,7 +42,7 @@ export function releaseNotes({ subjects, repository, base, head, previous }) {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  const repository = process.env.GITHUB_REPOSITORY || 'eluz1ve/lg-luma-plus';
+  const repository = 'davidsantanaalves/luma-evolution';
   const head = git('rev-parse', 'HEAD');
   const releases = JSON.parse(
     execFileSync('gh', ['api', `repos/${repository}/releases?per_page=100`], {

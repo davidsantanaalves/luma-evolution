@@ -11,7 +11,7 @@ fn run() -> luma_tv_helper::Result<Value> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|s| s == "--help") {
         println!(
-            "luma-helper: home COMMAND [APP_DIR] [HOME_ID] | read-app-icon JSON | sync-splash JSON | uninstall-app ID | tv-input COMMAND [APP_DIR] | app-update ID VERSION SHA256 IPK | running-list | running-close ID"
+            "luma-helper: home COMMAND [APP_DIR] [HOME_ID] | read-app-icon JSON | sync-splash JSON | uninstall-app ID | tv-input COMMAND [APP_DIR] | app-update ID VERSION SHA256 IPK | verify-self-update-ipk IPK VERSION | running-list | running-close ID"
         );
         return Ok(serde_json::json!({"returnValue":true}));
     }
@@ -72,6 +72,21 @@ fn run() -> luma_tv_helper::Result<Value> {
             arg(3)?,
             std::path::Path::new(arg(4)?),
         ),
+        "verify-self-update-ipk" => {
+            luma_tv_helper::system::root(&sys)?;
+            let path = std::path::Path::new(arg(1)?);
+            let version = arg(2)?;
+            let id = luma_tv_helper::APP;
+            let filename = format!("{id}_{version}_arm.ipk");
+            if !path.is_absolute()
+                || path.file_name().and_then(|name| name.to_str()) != Some(&filename)
+            {
+                return Err("IPK filename does not match the Evolution release".into());
+            }
+            let bytes = luma_tv_helper::system::read(&sys, path, luma_tv_helper::ipk::MAX_IPK)?;
+            luma_tv_helper::ipk::verify(&bytes, id, version)?;
+            Ok(serde_json::json!({"returnValue":true}))
+        }
         _ => Err("Unknown TV helper command".into()),
     }
 }

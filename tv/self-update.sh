@@ -1,21 +1,27 @@
 #!/bin/sh
 # Runs in its own systemd unit so installation can close/restart Luma safely.
 # Usage: self-update.sh IPK SHA256 VERSION APP_DIR ATTEMPT
+# Do not stage or install anything until the Evolution release channel is validated.
+SELF_UPDATE_ENABLED=false
+if [ "$SELF_UPDATE_ENABLED" != true ]; then
+  printf '%s\n' 'Luma Evolution self-update installation is disabled.' >&2
+  exit 1
+fi
 set -u
 IPK=$1
 SHA=$2
 VERSION=$3
 APP_DIR=$4
 ATTEMPT=$5
-STATE=/var/lib/luma-update
-HOME_STATE=/var/lib/luma-home
+STATE=/var/lib/luma-evolution-update
+HOME_STATE=/var/lib/luma-evolution-home
 case "$ATTEMPT" in ''|*[!0-9a-f]*) exit 1 ;; esac
 [ ${#ATTEMPT} = 32 ] || exit 1
 case "$SHA" in ''|*[!0-9a-f]*) exit 1 ;; esac
 [ ${#SHA} = 64 ] || exit 1
 case "$VERSION" in ''|*[!0-9.]*) exit 1 ;; esac
 case "$APP_DIR" in
-  /media/developer/apps/usr/palm/applications/com.eluz1ve.lumaplus|/media/cryptofs/apps/usr/palm/applications/com.eluz1ve.lumaplus|/usr/palm/applications/com.eluz1ve.lumaplus) ;;
+  /media/developer/apps/usr/palm/applications/com.davidsantana.lumaevolution|/media/cryptofs/apps/usr/palm/applications/com.davidsantana.lumaevolution|/usr/palm/applications/com.davidsantana.lumaevolution) ;;
   *) exit 1 ;;
 esac
 [ "$(id -u)" = 0 ] || exit 1
@@ -52,25 +58,28 @@ trap cleanup EXIT
 trap 'fail "Update interrupted."' HUP INT TERM
 publish starting 'Preparing the verified package.'
 # Install only the root-owned copy: another process cannot change it after verification.
-cp "$IPK" "$WORK/package.ipk" || fail 'Cannot stage the downloaded package.'
-IPK="$WORK/package.ipk"
+COPY="$WORK/com.davidsantana.lumaevolution_${VERSION}_arm.ipk"
+cp "$IPK" "$COPY" || fail 'Cannot stage the downloaded package.'
+IPK="$COPY"
 [ "$(sha256sum "$IPK" | cut -d' ' -f1)" = "$SHA" ] || fail 'Package checksum mismatch.'
+"$APP_DIR/luma-helper" verify-self-update-ipk "$IPK" "$VERSION" >>"$LOG" 2>&1 ||
+  fail 'Package identity or contents mismatch.'
 # Installing can end Luma before it removes its download, so drop it here and sweep what earlier
 # runs left. A directory under an hour old may be a Homebrew app update still in progress.
 discard() {
-  name=${1##*/luma-update-}
+  name=${1##*/luma-evolution-update-}
   case "$name" in ''|*[!0-9a-f]*) return ;; esac
   [ ${#name} = 32 ] && [ -d "$1" ] && [ ! -L "$1" ] || return
   rm -f "$1/package.ipk"
   rmdir "$1" 2>/dev/null
 }
-discard "/tmp/luma-update-$ATTEMPT"
-for old in $(find /tmp -maxdepth 1 -name 'luma-update-*' -mmin +60 2>/dev/null); do discard "$old"; done
+discard "/tmp/luma-evolution-update-$ATTEMPT"
+for old in $(find /tmp -maxdepth 1 -name 'luma-evolution-update-*' -mmin +60 2>/dev/null); do discard "$old"; done
 publish installing 'Installing Luma.'
 log "installing $VERSION"
 OUT="$WORK/install"
 luna-send -i -w 240000 luna://com.webos.appInstallService/dev/install \
-  "{\"id\":\"com.eluz1ve.lumaplus\",\"ipkUrl\":\"$IPK\",\"subscribe\":true}" >"$OUT" 2>&1 </dev/null &
+  "{\"id\":\"com.davidsantana.lumaevolution\",\"ipkUrl\":\"$IPK\",\"subscribe\":true}" >"$OUT" 2>&1 </dev/null &
 SEND=$!
 i=0
 while [ $i -lt 240 ]; do
@@ -84,7 +93,7 @@ kill "$SEND" 2>/dev/null || true
 wait "$SEND" 2>/dev/null || true
 SEND=
 head -c 4000 "$OUT" >>"$LOG"
-grep -q '"state": *"installed"' "$OUT" || fail 'Package installation failed or timed out; see /var/lib/luma-update/update.log.'
+grep -q '"state": *"installed"' "$OUT" || fail 'Package installation failed or timed out; see /var/lib/luma-evolution-update/update.log.'
 # A top-level string value from appinfo.json or state.json, minified or pretty-printed, without
 # Node. Neither file nests the key; callers compare or allowlist the value, so a miss fails safe.
 json_string() {
@@ -112,17 +121,17 @@ recover_home() {
   # Disable must complete, then independently verify both takeover methods are detached.
   if sh "$HOME_STATE/home.sh" disable >>"$LOG" 2>&1 </dev/null &&
      ! awk '$2 == "/usr/bin/com.webos.app.home" || $2 == "/usr/palm/applications/com.webos.app.home" || $2 == "/usr/bin/com.webos.app.fullhome" || $2 == "/usr/palm/applications/com.webos.app.fullhome" { found=1 } END { exit !found }' /proc/mounts &&
-     [ ! -e /var/run/luma-home ]; then
+     [ ! -e /var/run/luma-evolution-home ]; then
     launch "$HOME_ID" || fail 'LG Home was restored but could not be opened.'
     fail 'Update installed, but Home takeover failed; LG Home restored. Enable Luma Home again to retry.'
   fi
-  fail 'Update installed, but Home recovery needs attention; see /var/lib/luma-update/update.log.'
+  fail 'Update installed, but Home recovery needs attention; see /var/lib/luma-evolution-update/update.log.'
 }
 if grep -q '"enabled": *true' "$HOME_STATE/state.json" 2>/dev/null; then
   # Use the NEW scripts: refresh copied helpers and staged manifest as well as the executable.
   if ! printf 'y\n' | sh "$APP_DIR/home.sh" enable "$APP_DIR" "$HOME_ID" >>"$LOG" 2>&1; then recover_home; fi
   launch "$HOME_ID" || recover_home
 else
-  launch com.eluz1ve.lumaplus || fail 'Update installed, but Luma could not be opened.'
+  launch com.davidsantana.lumaevolution || fail 'Update installed, but Luma could not be opened.'
 fi
 publish success 'Luma was updated and reopened.'

@@ -14,11 +14,9 @@ pub fn allowed(id: &str) -> bool {
         && !["com.webos.", "com.palm.", "com.lge."]
             .iter()
             .any(|prefix| id.starts_with(prefix))
+        && !crate::OTHER_LUMA_APPS.contains(&id)
         && ![
             APP,
-            "com.luma.native",
-            "com.luma.launcher",
-            "com.luma.launcher.native",
             "org.webosbrew.hbchannel",
             "org.webosbrew.hbchannel.service",
         ]

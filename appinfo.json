@@ -1,10 +1,10 @@
 {
-  "id": "com.eluz1ve.lumaplus",
+  "id": "com.davidsantana.lumaevolution",
   "version": "1.0.0",
-  "vendor": "Luma+",
+  "vendor": "Luma Evolution",
   "type": "native",
   "main": "luma",
-  "title": "Luma+",
+  "title": "Luma Evolution",
   "icon": "app-icon.png",
   "largeIcon": "app-icon-large.png",
   "appDescription": "A remote-first native webOS launcher with a Today card and widgets.",

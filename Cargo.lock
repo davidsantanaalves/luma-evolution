@@ -312,6 +312,7 @@ dependencies = [
 name = "luma-tv-helper"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "libc",
  "ring",
  "serde",

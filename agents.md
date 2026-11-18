@@ -28,15 +28,14 @@ builds or tests.
 desktop OpenGL and mock weather HTTP. Linux can use `xvfb-run -a pnpm test:smoke`. Tests must not
 contact real weather APIs or a TV. Respect any user instruction to use manual TV verification
 instead of running automated tests. Builds/lint may still be run. Do not claim hardware behavior
-from desktop checks. Do not bump versions by hand: every push to `main` is released by CI as a
-build numbered by its date and time (`tools/build-number.mjs`, `development.md#releases`), and
+from desktop checks. Do not bump versions by hand: CI numbers each validation build by its date and time (`tools/build-number.mjs`, `development.md#releases`), and
 commit subjects become its release notes, so write them for readers of the release.
 `pnpm version:sync` synchronizes `package.json`, `appinfo.json`, the root `Cargo.toml`, the `luma`
 entry in `Cargo.lock` and README IPK examples; `pnpm version:check` checks them without writing.
 
 ## Build and identity
 
-`com.eluz1ve.lumaplus` is the native app's ID and `luma` its executable. Root `appinfo.json` is the
+`com.davidsantana.lumaevolution` is the native app's ID and `luma` its executable. Root `appinfo.json` is the
 package metadata source. It installs separately from the former web app `com.luma.launcher` and
 prototypes `com.luma.launcher.native` and `com.luma.native`, all excluded from app inventory. Preferences are local JSON
 per installation; browser local storage and preferences from other IDs are not migrated.
@@ -100,7 +99,7 @@ gallery to `.build/brands-gallery.png`; source restoration via `pnpm assets:bran
 `.github/workflows/ci.yml` is native-only: format/lint/workspace tests, asset generation and
 mocked desktop rendering, SDK setup, ARM cross-build, actual IPK verification/checksum/feed,
 artifacts and guarded publication. Keep existing published-version/draft/tag-commit checks.
-Every push to `main` publishes a build once all checks, smoke suites and the ARM package pass;
-so does a manual run of `main`; PRs and other branches build/check/package but do not publish. See `development.md#releases`.
+Release publication is disabled during foundation. Pushes to `develop` and `main`, PRs and
+manual runs build, check and package. See `development.md#releases`.
 Only create commits or PRs when explicitly requested. For PR descriptions follow the global
 `commands/pr.md` format instructions.

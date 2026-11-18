@@ -5476,10 +5476,10 @@ fn update_value(state: &State) -> String {
                 )
             } else {
                 language
-                    .t(if state.update_status == Status::Checking {
-                        "checkingUpdates"
-                    } else {
-                        "checkAgain"
+                    .t(match state.update_status {
+                        Status::Disabled => "updatesUnavailable",
+                        Status::Checking => "checkingUpdates",
+                        _ => "checkAgain",
                     })
                     .to_owned()
             }
@@ -6979,6 +6979,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
             }
         }
         SYSTEM_SECTION => {
+            let takeover_enabled = luma_tv_helper::home::TAKEOVER_ENABLED;
             let rows = [
                 (
                     3,
@@ -7017,12 +7018,14 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     language.t("homeTakeover"),
                     "homeTakeoverAbout",
                     "tv",
-                    Some(language.t(if state.home_takeover {
+                    Some(language.t(if !takeover_enabled {
+                        "featureUnavailable"
+                    } else if state.home_takeover {
                         "stateOn"
                     } else {
                         "stateOff"
                     })),
-                    true,
+                    takeover_enabled,
                 ),
                 (
                     5,
@@ -7432,6 +7435,7 @@ fn system_summary(out: &mut Scene, state: &State, assets: &Assets) {
         "updateAvailable"
     } else {
         match state.update_status {
+            crate::update::Status::Disabled => "updatesUnavailable",
             crate::update::Status::Unchecked => "checkForUpdates",
             crate::update::Status::Checking => "checkingUpdates",
             crate::update::Status::Checked => "latestVersionInstalled",

@@ -1,65 +1,87 @@
-// Inspect the actual IPK, and normalize only Luma-owned entries. The webOS CLI
-// emits world-writable directories; boot scripts need app-owned 0755 parents.
-import { gunzipSync, gzipSync } from 'node:zlib';
+import { gzipSync } from 'node:zlib';
+import { controlFields, entries, manifestJson, members } from './ipk-archive.mjs';
+import { verifyWebosSdl } from './webos-runtime.mjs';
 
-function members(bytes) {
-  if (bytes.subarray(0, 8).toString() !== '!<arch>\n') throw new Error('Not an IPK/ar archive.');
-  const result = [];
-  for (let offset = 8; offset + 60 <= bytes.length;) {
-    const header = Buffer.from(bytes.subarray(offset, offset + 60));
-    const size = Number(header.subarray(48, 58).toString().trim());
-    if (!Number.isSafeInteger(size) || size < 0 || offset + 60 + size > bytes.length)
-      throw new Error('Invalid IPK archive member.');
-    result.push({
-      header,
-      name: header.subarray(0, 16).toString().trim().replace(/\/$/, ''),
-      data: bytes.subarray(offset + 60, offset + 60 + size),
-    });
-    offset += 60 + size + (size % 2);
-  }
-  return result;
-}
+const controlLimit = 256 * 1024;
+const payloadLimit = 384 * 1024 * 1024;
+export const packagedScripts = ['autostart.sh', 'home.sh'];
 
-function entries(tar) {
-  const result = [];
-  for (let offset = 0; offset + 512 <= tar.length;) {
-    const header = tar.subarray(offset, offset + 512);
-    if (header.every((byte) => byte === 0)) break;
-    const text = (start, length) =>
-      header
-        .subarray(start, start + length)
-        .toString()
-        .replace(/\0.*$/, '');
-    const size = parseInt(text(124, 12).trim(), 8) || 0;
-    if (!Number.isSafeInteger(size) || size < 0 || offset + 512 + size > tar.length)
-      throw new Error('Invalid package tar member.');
-    const prefix = text(345, 155);
-    result.push({
-      header,
-      name: (prefix ? `${prefix}/` : '') + text(0, 100),
-      type: text(156, 1),
-      data: tar.subarray(offset + 512, offset + 512 + size),
-    });
-    offset += 512 + Math.ceil(size / 512) * 512;
-  }
-  return result;
-}
-
-export function normalizeAndVerifyPackage(bytes, manifest) {
-  const archive = members(bytes);
-  const member = archive.find((entry) => entry.name === 'data.tar.gz');
-  if (!member || !archive.some((entry) => entry.name === 'control.tar.gz'))
-    throw new Error('Incomplete IPK.');
-  const tar = gunzipSync(member.data);
-  const files = entries(tar);
-  const owned = files.filter((file) => file.name.split('/').includes(manifest.id));
-  if (!owned.length) throw new Error('The IPK contains no Luma app directory.');
+export function verifyPosixScript(bytes, name) {
   if (
-    owned.some((file) => /\/assets\/(app-icons(?:\/|$)|icons\.json$|colors\.json$)/.test(file.name))
+    !bytes ||
+    !bytes.subarray(0, 10).equals(Buffer.from('#!/bin/sh\n')) ||
+    bytes.includes(13) ||
+    bytes.includes(0)
+  )
+    throw new Error(`Packaged ${name} must be a POSIX shell script with LF line endings.`);
+}
+
+export function normalizeAndVerifyPackage(bytes, manifest, filename, expectedScripts) {
+  if (filename !== `${manifest.id}_${manifest.version}_arm.ipk`)
+    throw new Error('IPK filename must match the intended app ID, version and architecture.');
+  if (bytes.length > 96 * 1024 * 1024) throw new Error('IPK exceeds the size limit.');
+  const archive = members(bytes);
+  const controlArchive = archive.get('control.tar.gz');
+  const controlContents = entries(controlArchive.data, controlLimit);
+  const control = controlContents.files.get('control');
+  if (
+    !control ||
+    control.directory ||
+    [...controlContents.files].some(([name]) => name && name !== 'control')
+  )
+    throw new Error('IPK must contain one regular control file and no installation scripts.');
+  const fields = controlFields(control.data);
+  if (fields.get('architecture') !== 'arm')
+    throw new Error('The IPK must declare Architecture: arm.');
+  if (fields.get('package') !== manifest.id)
+    throw new Error('The IPK control file must declare the app ID from appinfo.json.');
+  if (fields.get('version') !== manifest.version)
+    throw new Error('The IPK control version must match appinfo.json.');
+
+  const member = archive.get('data.tar.gz');
+  const { tar, files } = entries(member.data, payloadLimit);
+  const root = `usr/palm/applications/${manifest.id}`;
+  const packageRoot = `usr/palm/packages/${manifest.id}`;
+  const packagePath = `${packageRoot}/packageinfo.json`;
+  const directories = new Set([
+    '',
+    'usr',
+    'usr/palm',
+    'usr/palm/applications',
+    'usr/palm/packages',
+    root,
+    packageRoot,
+  ]);
+  const owned = new Map();
+  for (const [name, file] of files) {
+    if (name.startsWith(root + '/')) owned.set(name.slice(root.length + 1), file);
+    else if (
+      !(directories.has(name) && file.directory) &&
+      !(name === packagePath && !file.directory)
+    )
+      throw new Error('Unexpected IPK payload path: ' + name);
+  }
+  const packageFile = files.get(packagePath);
+  const packageInfo = packageFile && manifestJson(packageFile.data);
+  if (
+    packageInfo?.id !== manifest.id ||
+    packageInfo.version !== manifest.version ||
+    packageInfo.app !== manifest.id ||
+    Object.keys(packageInfo).some((key) => !['id', 'version', 'app'].includes(key))
+  )
+    throw new Error('Packaged packageinfo.json must describe only the intended app and version.');
+  const read = (name) => {
+    const file = owned.get(name);
+    return file && !file.directory ? file.data : undefined;
+  };
+  if (
+    [...owned.keys()].some((name) =>
+      /^assets\/(app-icons(?:\/|$)|icons\.json$|colors\.json$)/.test(name),
+    )
   )
     throw new Error('Retired dumped artwork must not be shipped in the TV package.');
-  const appinfo = owned.find((file) => file.name.endsWith('/appinfo.json'));
-  const actual = appinfo && JSON.parse(appinfo.data.toString());
+  const appinfo = read('appinfo.json');
+  const actual = appinfo && manifestJson(appinfo);
   if (
     actual?.id !== manifest.id ||
     actual?.version !== manifest.version ||
@@ -71,8 +93,8 @@ export function normalizeAndVerifyPackage(bytes, manifest) {
     throw new Error('Packaged app permissions do not match the source.');
   if (actual.icon !== manifest.icon || actual.largeIcon !== manifest.largeIcon)
     throw new Error('Packaged icon paths do not match the source.');
-  const vectorManifest = owned.find((file) => file.name.endsWith('/assets/vector-artwork.json'));
-  const vectorAssets = vectorManifest && JSON.parse(vectorManifest.data.toString());
+  const vectorManifest = read('assets/vector-artwork.json');
+  const vectorAssets = vectorManifest && manifestJson(vectorManifest);
   if (
     vectorAssets?.version !== 1 ||
     !Array.isArray(vectorAssets.assets) ||
@@ -83,8 +105,7 @@ export function normalizeAndVerifyPackage(bytes, manifest) {
     manifest.main,
     manifest.icon,
     manifest.largeIcon,
-    'autostart.sh',
-    'home.sh',
+    ...packagedScripts,
     'luma-helper',
     'splash.png',
     'lib/libSDL2-2.0.so.0',
@@ -123,11 +144,17 @@ export function normalizeAndVerifyPackage(bytes, manifest) {
       return `assets/${name}`;
     }),
   ]) {
-    if (!owned.some((file) => file.name.endsWith(`/${required}`) && file.data.length > 0))
-      throw new Error(`Package is missing ${required}.`);
+    if (!read(required)?.length) throw new Error(`Package is missing ${required}.`);
   }
+  for (const name of packagedScripts) {
+    const script = read(name);
+    verifyPosixScript(script, name);
+    if (expectedScripts && !script.equals(expectedScripts.get(name)))
+      throw new Error(`Packaged ${name} differs from the checked script.`);
+  }
+  verifyWebosSdl(read('lib/libSDL2-2.0.so.0'));
   for (const name of [manifest.main, 'luma-helper']) {
-    const executable = owned.find((file) => file.name.endsWith(`/${name}`))?.data;
+    const executable = read(name);
     if (
       !executable ||
       executable.length < 52 ||
@@ -139,20 +166,11 @@ export function normalizeAndVerifyPackage(bytes, manifest) {
     )
       throw new Error(`Packaged ${name} must be an ARM soft-float ELF.`);
   }
-  const controlArchive = archive.find((entry) => entry.name === 'control.tar.gz');
-  const control = entries(gunzipSync(controlArchive.data))
-    .find((file) => file.name.replace(/^\.\//, '') === 'control')
-    ?.data.toString();
-  if (!control || !/^Architecture: arm\s*$/m.test(control))
-    throw new Error('The IPK must declare Architecture: arm.');
-  const version = owned
-    .find((file) => file.name.endsWith('/assets/version.txt'))
-    ?.data.toString()
-    .trim();
+  const version = read('assets/version.txt')?.toString().trim();
   if (version !== manifest.version)
     throw new Error('Packaged assets were generated for another version.');
-  const vectorFiles = owned.filter((file) => file.name.endsWith('.lvec'));
-  for (const file of vectorFiles) {
+  for (const [name, file] of owned) {
+    if (!name.endsWith('.lvec')) continue;
     if (
       file.data.length < 20 ||
       file.data.subarray(0, 8).toString() !== 'LUMAVEC1' ||
@@ -160,31 +178,35 @@ export function normalizeAndVerifyPackage(bytes, manifest) {
       file.data.readUInt32LE(16) % 3 !== 0 ||
       file.data.length !== 20 + file.data.readUInt32LE(16) * 36
     )
-      throw new Error(`Invalid packaged vector geometry: ${file.name}`);
+      throw new Error(`Invalid packaged vector geometry: ${name}`);
   }
-  for (const file of owned) {
-    if (!['', '0', '5'].includes(file.type))
-      throw new Error(`Unexpected package entry type: ${file.name}`);
-    const executable =
-      file.type === '5' ||
-      file.name.endsWith('/autostart.sh') ||
-      file.name.endsWith('/home.sh') ||
-      file.name.endsWith('/luma-helper') ||
-      file.name.endsWith(`/${manifest.main}`);
-    file.header.write(executable ? '0000755\0' : '0000644\0', 100, 8, 'ascii');
-    file.header.fill(32, 148, 156);
-    const sum = file.header.reduce((total, byte) => total + byte, 0);
-    file.header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'ascii');
+  const executables = new Set(
+    [manifest.main, 'luma-helper', ...packagedScripts].map((name) => `${root}/${name}`),
+  );
+  for (const [name, file] of files) {
+    normalizeHeader(file, file.directory || executables.has(name));
   }
+  for (const file of controlContents.files.values()) normalizeHeader(file, file.directory);
+  controlArchive.data = gzipSync(controlContents.tar, { level: 9 });
   member.data = gzipSync(tar, { level: 9 });
   const parts = [Buffer.from('!<arch>\n')];
-  for (const entry of archive) {
+  for (const entry of archive.values()) {
     entry.header.write(String(entry.data.length).padEnd(10, ' '), 48, 10, 'ascii');
     parts.push(entry.header, entry.data);
     if (entry.data.length % 2) parts.push(Buffer.from('\n'));
   }
   console.log(
-    `Verified IPK contents: ${owned.length} Luma entries; app metadata, assets and modes checked.`,
+    `Verified IPK contents: ${owned.size} Luma entries; app metadata, assets, scripts and modes checked.`,
   );
   return Buffer.concat(parts);
+}
+
+function normalizeHeader({ header }, executable) {
+  header.write(executable ? '0000755\0' : '0000644\0', 100, 8, 'ascii');
+  header.write('0000000\0'.repeat(2), 108, 16, 'ascii');
+  header.fill(0, 265, 329);
+  if (header[475] === 0) header.fill(0, 476, 500);
+  header.fill(32, 148, 156);
+  const sum = header.reduce((total, byte) => total + byte, 0);
+  header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'ascii');
 }

@@ -1,8 +1,8 @@
 {
-  "name": "lg-luma-plus",
+  "name": "luma-evolution",
   "version": "1.0.0",
   "private": true,
-  "description": "LG Luma+: a remote-first webOS launcher with a Today card and Lampa, CS2 and crypto widgets.",
+  "description": "Luma Evolution: a remote-first webOS launcher with a Today card and Lampa, CS2 and crypto widgets.",
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@10.34.5",

@@ -1,6 +1,6 @@
 // Measures frame times on the TV: for each variant, writes the app's perf switch file (a scripted
 // walk through Home, the menu, Today and Settings, plus the variant's launch options), relaunches
-// Luma+, saves perf.log to dist/perf/<variant>.log, and prints one summary row per variant.
+// Luma Evolution, saves perf.log to dist/perf/<variant>.log, and prints one summary row per variant.
 // The walk never presses OK (`today` and `side-menu` open those without moving the focus), so no
 // app or poster launches. Afterwards the switch file is left as
 // it was found.
@@ -112,7 +112,7 @@ const directory = shell(
   .trim()
   .split('\n')[0];
 if (!directory)
-  throw new Error(`No ${manifest.id} preferences on the TV; launch Luma+ once first.`);
+  throw new Error(`No ${manifest.id} preferences on the TV; launch Luma Evolution once first.`);
 const switchFile = `${directory}/perf`;
 const existed = shell(`[ -e ${switchFile} ] && echo yes; echo`).trim() === 'yes';
 // The switch file holds only perf options.

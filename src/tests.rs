@@ -1184,7 +1184,7 @@ fn text_rendering_choices_persist_and_back_restores_the_system_row() {
     settle(&mut state);
     assert!(scene(&state).draw.iter().any(|draw| matches!(
         draw,
-        crate::renderer::Draw::Text(label, ..) if label == "Restart Luma+ to apply changes."
+        crate::renderer::Draw::Text(label, ..) if label == "Restart Luma Evolution to apply changes."
     )));
     state.direction(Direction::Down, &controls(&state));
     assert_eq!(state.focus, Target::Choice(1));
@@ -3360,7 +3360,7 @@ fn update_card_shows_both_versions_and_explicitly_starts_installation() {
                 .iter()
                 .any(|control| control.target == Target::InstallUpdate)
         );
-        state.available_update = Some("9.0.0".into());
+        state.update_response(Ok(Some("9.0.0".into())));
         let rendered = scene(&state);
         for label in [
             language.t("updateAvailable").to_owned(),
@@ -3406,6 +3406,7 @@ fn update_card_shows_both_versions_and_explicitly_starts_installation() {
 fn update_status_card_only_claims_latest_after_success_and_allows_single_flight_retry() {
     use crate::{renderer::Draw, update::Status};
     let mut state = ready();
+    state.update_status = Status::Unchecked;
     state.open(2);
     state.section = crate::state::SYSTEM_SECTION;
     state.focus = Target::CheckUpdates;
@@ -3580,51 +3581,27 @@ fn tiles_edited_elsewhere_join_and_leave_home_like_tv_edits() {
 }
 
 #[test]
-fn home_takeover_is_chosen_in_system_and_only_changes_on_a_new_choice() {
-    use crate::state::Subpage;
+fn home_takeover_and_launcher_updates_report_unavailable_without_activating() {
     let mut state = ready();
     state.open(2);
     state.section = crate::state::SYSTEM_SECTION;
     state.focus = Target::Setting(crate::state::HOME_TAKEOVER_ROW);
-    assert!(
-        controls(&state)
-            .iter()
-            .any(|c| c.target == Target::Setting(crate::state::HOME_TAKEOVER_ROW))
-    );
-    state.direction(Direction::Right, &controls(&state));
-    assert_eq!(state.subpage, Some(Subpage::HomeTakeover));
-    assert_eq!(
-        state.focus,
-        Target::Choice(1),
-        "starts on the current state: off"
-    );
-    // Off again changes nothing.
-    assert_eq!(state.activate(), vec![]);
-    assert_eq!(
-        state.focus,
-        Target::Setting(crate::state::HOME_TAKEOVER_ROW)
-    );
-    state.activate();
-    state.direction(Direction::Up, &controls(&state));
-    assert_eq!(state.focus, Target::Choice(0));
-    assert_eq!(state.activate(), vec![Effect::HomeTakeover(true)]);
+    assert!(state.activate().is_empty());
     assert_eq!(state.subpage, None);
-    assert_eq!(
-        state.focus,
-        Target::Setting(crate::state::HOME_TAKEOVER_ROW)
-    );
-    // Running as Home, the page offers to turn it off.
-    state.home_takeover = true;
-    state.activate();
-    assert_eq!(state.focus, Target::Choice(0));
-    state.direction(Direction::Down, &controls(&state));
-    assert_eq!(state.activate(), vec![Effect::HomeTakeover(false)]);
+    assert!(scene(&state).draw.iter().any(|draw| matches!(draw,
+        crate::renderer::Draw::Text(label, ..) if label == "Unavailable"
+    )));
+    state.focus = Target::CheckUpdates;
+    assert!(state.activate().is_empty());
+    assert!(!state.update_check_requested);
+    assert_eq!(state.update_status, crate::update::Status::Disabled);
 }
 
 #[test]
 fn update_card_shows_progress_restores_retry_and_ignores_presses_while_busy() {
     use crate::update::{InstallStatus, Response, Status};
     let mut state = ready();
+    state.update_status = Status::Unchecked;
     state.open(2);
     state.section = crate::state::SYSTEM_SECTION;
     state.focus = Target::CheckUpdates;

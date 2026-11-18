@@ -1018,7 +1018,7 @@ fn log_home_output() {
         .create(true)
         .write(true)
         .truncate(true)
-        .open("/tmp/luma-home.log")
+        .open("/tmp/luma-evolution-home.log")
     {
         unsafe { libc::dup2(file.into_raw_fd(), 2) };
     }
@@ -1040,18 +1040,19 @@ fn next_prewarm(
 
 fn run() -> Result<(), String> {
     let startup = Instant::now();
-    // In place of LG's Home, before parsing, so option errors are kept too.
-    #[cfg(all(feature = "webos", unix))]
-    if platform::runs_as_lg_home() {
-        log_home_output();
-    }
-    let mut options = Options::parse()?;
-    // A staged Home manifest (webOS 10/11) is only recognised from its launch parameters.
-    #[cfg(all(feature = "webos", unix))]
-    if options.webos_home && !platform::runs_as_lg_home() {
-        log_home_output();
-    }
     let webos = cfg!(feature = "webos");
+    let mut options = Options::parse()?;
+    if webos
+        && !luma_tv_helper::home::TAKEOVER_ENABLED
+        && (options.webos_home || platform::runs_as_lg_home())
+    {
+        return Err("Luma Evolution Home takeover is disabled".into());
+    }
+    // Both Home launch methods need their own log because SAM discards stderr.
+    #[cfg(all(feature = "webos", unix))]
+    if options.webos_home || platform::runs_as_lg_home() {
+        log_home_output();
+    }
     let startup_stage = |stage: &str| {
         if webos {
             eprintln!(
@@ -1157,10 +1158,8 @@ fn run() -> Result<(), String> {
             renderer::set_profile_skip(skip);
         }
     }
-    let public_update_checks = update::public_checks_enabled(
-        !options.script.is_empty(),
-        options.test_update_version.is_some(),
-    );
+    let interactive_run = options.script.is_empty() && options.test_update_version.is_none();
+    let public_update_checks = update::SELF_UPDATE_ENABLED && interactive_run;
     let mut state = State::new(initial_preferences);
     // Each wallpaper fade waits until its new wallpaper is decoded and its ends are drawn.
     state.hold_fades = true;
@@ -1232,7 +1231,7 @@ fn run() -> Result<(), String> {
     let cub_service = cub_service::Service::new(cub_service::Client::new());
     let app_cards_service = app_cards_service::Service::new(webos);
     let updates = update::Worker::new(webos && public_update_checks);
-    let homebrew = homebrew_updates::Worker::new(webos && public_update_checks);
+    let homebrew = homebrew_updates::Worker::new(webos && interactive_run);
     let platform = Platform::new(
         webos,
         options.preferences.is_none() && options.test_extra_apps == 0,
@@ -1298,7 +1297,7 @@ fn run() -> Result<(), String> {
         eprintln!("Luma launch: preload={mode}; starting hidden until Home is launched");
     }
     let create_window = || {
-        let mut builder = video.window("Luma+", requested.width, requested.height);
+        let mut builder = video.window("Luma Evolution", requested.width, requested.height);
         builder.opengl().allow_highdpi().position_centered();
         if start_hidden {
             builder.hidden();
@@ -1363,7 +1362,7 @@ fn run() -> Result<(), String> {
     if let Some(log) = &mut perf_log {
         let timer = gpu_timer::GpuTimer::load(webos, |name| video.gl_get_proc_address(name).cast());
         log.note(&format!(
-            "start Luma+ {} {} msaa {samples} partial {} ground {} layers {} gpu timer {}",
+            "start Luma Evolution {} {} msaa {samples} partial {} ground {} layers {} gpu timer {}",
             env!("CARGO_PKG_VERSION"),
             renderer.info.renderer,
             partial
@@ -1927,7 +1926,7 @@ fn run() -> Result<(), String> {
                 focused = true;
                 foreground.confirmed();
             }
-            // As Home, these go to /tmp/luma-home.log and show whether a relaunch reached the
+            // As Home, these go to /tmp/luma-evolution-home.log and show whether a relaunch reached the
             // compositor.
             if options.webos_home
                 && let Event::Window { win_event, .. } = &event
@@ -2556,7 +2555,7 @@ fn run() -> Result<(), String> {
                         &mut full_report
                     };
                     let save = (damage.is_some() && report.1 == 0)
-                        .then(|| std::path::Path::new("/tmp/luma-damage-check"));
+                        .then(|| std::path::Path::new("/tmp/luma-evolution-damage-check"));
                     let (differing, largest) =
                         renderer.verify_window(&scene.draw, width, height, save);
                     report.0 += 1;

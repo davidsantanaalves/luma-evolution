@@ -1,4 +1,4 @@
-// Luma+ builds are numbered by when they are made, in the maintainer's time zone: build
+// Luma Evolution builds are numbered by when they are made, in the maintainer's time zone: build
 // 2611081530 was made on 8 November 2026 at 15:30. Its app version, 26.1108.1530, is the same
 // digits split in three, which webOS and the updater compare as numbers: a later build is always
 // a newer version, and newer than every 1.x release before builds.
@@ -67,7 +67,7 @@ export function releaseTag(version) {
 /** The release title of an app version. */
 export function releaseTitle(version) {
   const number = numberOf(version);
-  return number ? `Luma+ build #${number}` : `Luma+ ${version}`;
+  return number ? `Luma Evolution build #${number}` : `Luma Evolution ${version}`;
 }
 
 /** Writes `version` into package.json, then every file synchronized from it. */

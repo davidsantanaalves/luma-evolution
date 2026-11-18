@@ -2,26 +2,49 @@
 //! repository (opt-in setting). Everything Luma checked is checked again here as root: the app is
 //! a Homebrew installation, it is not running, and the package matches its repository checksum.
 use crate::{
-    APP, Result, accepted,
+    APP, OTHER_LUMA_APPS, Result, accepted, ipk,
     system::{self, System},
     valid_app_id,
 };
 use serde_json::{Value, json};
-use std::{io::Read, path::Path};
+use std::{fs, path::Path};
 
 /// Homebrew Channel installs apps here, as developer-mode packages.
 pub const APPS: &str = "/media/developer/apps/usr/palm/applications";
-/// Updated by their own mechanisms: Luma's self-update and Homebrew Channel's updater.
-pub const EXCLUDED: [&str; 2] = [APP, "org.webosbrew.hbchannel"];
-const WORK: &str = "/var/lib/luma-update/apps";
-const MAX_IPK: u64 = 96 * 1024 * 1024;
+pub fn excluded(id: &str) -> bool {
+    id == APP
+        || matches!(
+            id,
+            "org.webosbrew.hbchannel" | "org.webosbrew.hbchannel.service"
+        )
+        || OTHER_LUMA_APPS.contains(&id)
+        || ["com.webos.", "com.palm.", "com.lge."]
+            .iter()
+            .any(|prefix| id.starts_with(prefix))
+}
+const STATE: &str = "/var/lib/luma-evolution-update";
+const WORK: &str = "/var/lib/luma-evolution-update/apps";
 
-pub fn valid_version(version: &str) -> bool {
-    !version.is_empty()
-        && version.len() <= 32
-        && version
-            .split('.')
-            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+/// Shipping releases use strict three-part numeric versions, never lexical comparison.
+pub fn numeric_version(value: &str) -> Option<[u64; 3]> {
+    if value.len() > 32 {
+        return None;
+    }
+    let parts: Vec<_> = value.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let mut result = [0; 3];
+    for (index, part) in parts.into_iter().enumerate() {
+        if part.is_empty()
+            || (part.len() > 1 && part.starts_with('0'))
+            || !part.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        result[index] = part.parse().ok()?;
+    }
+    Some(result)
 }
 
 fn valid_sha256(sha: &str) -> bool {
@@ -55,28 +78,34 @@ fn running(system: &impl System, id: &str) -> Result<bool> {
         .is_some_and(|apps| apps.iter().any(|app| app["id"] == id)))
 }
 
-fn sha256(system: &impl System, path: &Path) -> Result<String> {
-    let mut file = std::fs::File::open(system.path(path)).map_err(|e| e.to_string())?;
-    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
-    let mut buffer = vec![0; 64 * 1024];
-    let mut total = 0u64;
-    loop {
-        let count = file.read(&mut buffer).map_err(|e| e.to_string())?;
-        if count == 0 {
-            break;
-        }
-        total += count as u64;
-        if total > MAX_IPK {
-            return Err("Package too large".into());
-        }
-        digest.update(&buffer[..count]);
-    }
-    Ok(digest
-        .finish()
+fn sha256(bytes: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
         .as_ref()
         .iter()
         .map(|b| format!("{b:02x}"))
-        .collect())
+        .collect()
+}
+
+#[cfg(unix)]
+fn private_directory(system: &impl System, path: &str) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    let path = system.path(Path::new(path));
+    match fs::DirBuilder::new().mode(0o700).create(&path) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+    if !metadata.is_dir() || metadata.uid() != system::Tv.uid() || metadata.mode() & 0o022 != 0 {
+        return Err("Unsafe IPK staging directory".into());
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| error.to_string())
+}
+
+#[cfg(not(unix))]
+fn private_directory(_system: &impl System, _path: &str) -> Result<()> {
+    Err("IPK staging requires Unix".into())
 }
 
 /// Installs `ipk` as `version` of the Homebrew app `id`. The package is first copied into a
@@ -89,10 +118,13 @@ pub fn install(
     ipk: &Path,
 ) -> Result<Value> {
     system::root(system)?;
-    if !valid_app_id(id) || EXCLUDED.contains(&id) {
+    if !valid_app_id(id) || excluded(id) {
         return Err("This app is not updated by Luma".into());
     }
-    if !valid_version(version) || !valid_sha256(sha) || !ipk.is_absolute() {
+    let Some(candidate) = numeric_version(version) else {
+        return Err("Invalid update version".into());
+    };
+    if !valid_sha256(sha) || !ipk.is_absolute() {
         return Err("Invalid update request".into());
     }
     let current = installed_version(system, id)?;
@@ -102,15 +134,32 @@ pub fn install(
     if running(system, id)? {
         return Err("The app is running; the update waits until it is closed".into());
     }
-    system::mkdir(system, "/var/lib/luma-update")?;
-    system::mkdir(system, WORK)?;
-    let copy = Path::new(WORK).join(format!("{id}.ipk"));
+    let bytes = system::read(system, ipk, ipk::MAX_IPK)?;
+    if sha256(&bytes) != sha {
+        return Err("The package does not match its repository checksum".into());
+    }
+    let architecture = ipk::verify(&bytes, id, version)?;
+    private_directory(system, STATE)?;
+    private_directory(system, WORK)?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(system.path(&Path::new(WORK).join(format!("{id}.lock"))))
+        .map_err(|e| e.to_string())?;
+    if !system::lock(&lock) {
+        return Err("An update for this app is already running".into());
+    }
+    let current = installed_version(system, id)?;
+    if current == version {
+        return Ok(json!({"returnValue": true, "version": version, "changed": false}));
+    }
+    if numeric_version(&current).is_none_or(|current| current >= candidate) {
+        return Err("The requested version is older than or equal to the installed version".into());
+    }
+    let copy = Path::new(WORK).join(format!("{id}_{version}_{architecture}.ipk"));
     let result = (|| {
-        let bytes = system::read(system, ipk, MAX_IPK as usize)?;
         system::write(system, &copy, &bytes, 0o600)?;
-        if sha256(system, &copy)? != sha {
-            return Err("The package does not match its repository checksum".into());
-        }
         // Checked once more right before installing: the user may have opened the app meanwhile.
         if running(system, id)? {
             return Err("The app is running; the update waits until it is closed".into());

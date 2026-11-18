@@ -15,8 +15,7 @@ const requestedTag =
 if (requestedTag && requestedTag !== tag)
   throw new Error(`Release tag must be ${tag}, matching the packaged app version.`);
 
-const repository = process.env.GITHUB_REPOSITORY || 'eluz1ve/lg-luma-plus';
-if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error('Invalid GitHub repository name.');
+const repository = 'davidsantanaalves/luma-evolution';
 const sourceUrl = `https://github.com/${repository}`;
 const releaseUrl = `${sourceUrl}/releases/download/${tag}`;
 const filename = `${manifest.id}_${manifest.version}_arm.ipk`;

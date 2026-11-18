@@ -4,12 +4,21 @@ pub mod app_update;
 pub mod files;
 pub mod home;
 pub mod input;
+pub mod ipk;
 pub mod running;
 pub mod system;
 pub mod uninstall;
 
 pub type Result<T> = std::result::Result<T, String>;
-pub const APP: &str = "com.eluz1ve.lumaplus";
+pub const APP: &str = "com.davidsantana.lumaevolution";
+pub const LUMA_PLUS: &str = "com.eluz1ve.lumaplus";
+pub const OTHER_LUMA_APPS: [&str; 5] = [
+    LUMA_PLUS,
+    "com.ecklf.luma",
+    "com.luma.native",
+    "com.luma.launcher",
+    "com.luma.launcher.native",
+];
 pub const ROOTS: [&str; 5] = [
     "/media/developer/apps/usr/palm/applications",
     "/media/cryptofs/apps/usr/palm/applications",

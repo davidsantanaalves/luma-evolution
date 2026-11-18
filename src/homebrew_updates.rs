@@ -6,7 +6,7 @@
 use crate::update::{self, Release};
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Read,
     path::Path,
@@ -40,12 +40,17 @@ pub struct Update {
 }
 
 fn valid_package(release: &Release) -> bool {
+    const UPSTREAM: &str = "https://github.com/eluz1ve/lg-luma-plus/";
     let file = release.url.rsplit('/').next().unwrap_or_default();
     release.url.starts_with("https://")
+        && !release
+            .url
+            .get(..UPSTREAM.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(UPSTREAM))
         && file.ends_with(".ipk")
         && !release.url.contains(['?', '#', '\\', ' '])
         && !release.url.contains("..")
-        && luma_tv_helper::app_update::valid_version(&release.version)
+        && luma_tv_helper::app_update::numeric_version(&release.version).is_some()
         && release.sha256.len() == 64
         && release.sha256.bytes().all(|b| b.is_ascii_hexdigit())
         && release.size > 0
@@ -59,12 +64,20 @@ pub fn parse_repo(feed: &Value) -> Result<BTreeMap<String, (String, Release)>, S
         .as_array()
         .ok_or("The Homebrew repository has no packages")?;
     let mut found = BTreeMap::new();
+    let mut seen = BTreeSet::new();
     for package in packages {
         let manifest = &package["manifest"];
         let Some(id) = package["id"].as_str() else {
             continue;
         };
-        if manifest["id"] != id || !luma_tv_helper::valid_app_id(id) {
+        if !luma_tv_helper::valid_app_id(id) {
+            continue;
+        }
+        if !seen.insert(id) {
+            found.remove(id);
+            continue;
+        }
+        if manifest["id"] != id {
             continue;
         }
         let text = |key: &str| manifest[key].as_str().unwrap_or_default().to_owned();
@@ -92,7 +105,7 @@ pub fn due(
 ) -> Vec<Update> {
     installed
         .iter()
-        .filter(|(id, _)| !luma_tv_helper::app_update::EXCLUDED.contains(&id.as_str()))
+        .filter(|(id, _)| !luma_tv_helper::app_update::excluded(id))
         .filter_map(|(id, version)| {
             let (title, release) = repo.get(id)?;
             update::newer(version, &release.version).then(|| Update {

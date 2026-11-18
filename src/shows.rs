@@ -12,9 +12,8 @@ const POSTER_ORIGINS: [&str; 2] = [
     "https://imagetmdb.com/t/p/w342",
 ];
 /// The Lampa plugin that opens the cards Luma asks for (Lampa on webOS ignores launch
-/// parameters); it lives beside Luma+ in `lampa/` and is served from the fork's main branch.
-pub const LAMPA_PLUGIN: &str =
-    "https://cdn.jsdelivr.net/gh/eluz1ve/lg-luma-plus@main/lampa/luma.js";
+/// parameters). This revision contains the same plug-in as the bundled `lampa/luma.js`.
+pub const LAMPA_PLUGIN: &str = "https://cdn.jsdelivr.net/gh/eluz1ve/lg-luma-plus@008231201726042896b2abd2dcea421b2f4c89d6/lampa/luma.js";
 /// The row lists; six cards show at a time, the favorites' width and pitch.
 pub const SHOWN: usize = 18;
 pub const VISIBLE: usize = 6;
