@@ -43,6 +43,7 @@
   7.6.0, MIT, notice at `assets/licenses/flag-icons.txt`. `tools/flag-assets.mjs` renders them to
   the small PNGs beside player names on the CS2 match page.
 - `assets/ui-icons/upload.svg` and `assets/wallpaper-upload/`: original Luma artwork/UI, MIT.
+- `assets/ui-icons/evolution-settings.svg`: Luma Evolution gear icon, MIT.
 
 The bundled icon/logo SVG sources are compiled into derived `.lvec` triangles with the same
 source licenses. Apple TV, Disney+, Prime Video and Das Erste retain the white display treatment.

@@ -4569,3 +4569,5 @@ fn favorites_can_follow_the_last_launch() {
     assert_eq!(after[0], last);
     assert_eq!(&after[1..], &before[..before.len() - 1]);
 }
+#[path = "home-evolution-tests.rs"]
+mod home_evolution_tests;

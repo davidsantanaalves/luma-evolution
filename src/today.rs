@@ -150,12 +150,12 @@ pub type Sections = Vec<(Section, Vec<Line>)>;
 /// card has room for. Empty sections and tabs are dropped.
 pub fn tabs(state: &State, now: i64, date: Date) -> Vec<(Tab, Sections)> {
     let preferences = &state.preferences;
-    let feed = preferences
-        .in_today(crate::model::Center::Shows)
+    let feed = state
+        .evolution_widget_in_today(crate::model::Center::Shows)
         .then_some(preferences.lampa_feed);
     let lampa = feed == Some(crate::model::LampaFeed::Continue) && state.cub.signed_in();
     let mut tabs = Vec::new();
-    if preferences.in_today(crate::model::Center::Cs2)
+    if state.evolution_widget_in_today(crate::model::Center::Cs2)
         && !state.cs2.stale(now)
         && let Some(feed) = state.cs2.current(now)
     {
@@ -214,14 +214,14 @@ pub fn tabs(state: &State, now: i64, date: Date) -> Vec<(Tab, Sections)> {
 
 fn gather(state: &State, now: i64, date: Date) -> Day {
     let preferences = &state.preferences;
-    let feed = preferences
-        .in_today(crate::model::Center::Shows)
+    let feed = state
+        .evolution_widget_in_today(crate::model::Center::Shows)
         .then_some(preferences.lampa_feed);
     let lampa = feed == Some(crate::model::LampaFeed::Continue) && state.cub.signed_in();
     let mut live = Vec::new();
     let mut coming = Vec::new();
     // An old feed's "live" may long be over.
-    if preferences.in_today(crate::model::Center::Cs2)
+    if state.evolution_widget_in_today(crate::model::Center::Cs2)
         && !state.cs2.stale(now)
         && let Some(feed) = state.cs2.current(now)
     {
@@ -262,7 +262,7 @@ fn gather(state: &State, now: i64, date: Date) -> Day {
 
 /// The apps' cards, when the Apps widget sits in Today.
 fn app_lines(state: &State) -> Vec<Line> {
-    if !state.preferences.in_today(crate::model::Center::Apps) {
+    if !state.evolution_widget_in_today(crate::model::Center::Apps) {
         return Vec::new();
     }
     state

@@ -1,3 +1,4 @@
+use crate::home_evolution::{CinemaScale, DockHorizontal, DockScale};
 use crate::i18n::Language;
 use crate::model::{
     App, BACKGROUNDS, CATEGORIES, CUSTOM_TILE_PREFIX, CustomTile, INPUT_NAME_LIMIT, InputMode,
@@ -10,6 +11,11 @@ use std::time::{Duration, Instant};
 
 pub const BACKGROUND_SECTION: usize = 1;
 pub const INTERFACE_SCALE_ROW: usize = 8;
+pub const TV_SETTINGS_ROW: usize = 16;
+pub const DOCK_ROW: usize = 17;
+pub const NAVIGATION_ROW: usize = 18;
+pub const ABOUT_ROW: usize = 19;
+pub const CINEMA_ROW: usize = 20;
 pub const WIDGETS_SECTION: usize = 2;
 pub const SYSTEM_SECTION: usize = 3;
 /// System › Luma as Home screen.
@@ -66,6 +72,10 @@ const ASIDE: f32 = 10000.;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum Target {
+    EvolutionArea(crate::home_evolution::Area),
+    EvolutionWidget(crate::home_evolution::WidgetApp),
+    EvolutionGlobal(crate::home_evolution::GlobalAction),
+    EvolutionContent(String),
     /// A page in the menu: Home, Apps, Settings.
     Nav(usize),
     /// The menu's Inputs: folds the list of inputs open and closed.
@@ -88,6 +98,22 @@ pub enum Target {
     ClearSearch,
     Sidebar(usize),
     Setting(usize),
+    DockScale,
+    DockScaleStep(bool),
+    DockHorizontal,
+    DockHorizontalStep(bool),
+    DockApply,
+    DockRestore,
+    DockConfirmRestore,
+    DockCancel,
+    CinemaScale,
+    CinemaScaleStep(bool),
+    CinemaApply,
+    CinemaRestore,
+    CinemaConfirmRestore,
+    CinemaCancel,
+    CinemaDiscard,
+    CinemaContinue,
     Widget(usize),
     GreetingName,
     GreetingNameClear,
@@ -310,6 +336,17 @@ const TODAY_OPEN: f32 = 0.25;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum Subpage {
+    Navigation,
+    Dock {
+        scale: DockScale,
+        horizontal: DockHorizontal,
+        confirming_restore: bool,
+    },
+    Cinema {
+        scale: CinemaScale,
+        prompt: Option<CinemaScalePrompt>,
+    },
+    About,
     AppNames,
     Greeting,
     Date,
@@ -341,6 +378,12 @@ pub enum Subpage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub enum CinemaScalePrompt {
+    Restore,
+    Unsaved,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub enum TextField {
     Apps,
     Location,
@@ -360,6 +403,11 @@ pub enum Direction {
 #[derive(Debug, PartialEq)]
 pub enum Effect {
     Save,
+    SaveDockSettings {
+        scale: DockScale,
+        horizontal: DockHorizontal,
+    },
+    SaveCinemaScale(CinemaScale),
     /// Read the app inventory again, keeping decoded icons of unchanged apps.
     Refresh,
     /// Refresh apps: read the inventory and every app icon again.
@@ -397,6 +445,7 @@ pub const KEYS: [&str; 40] = [
 ];
 
 pub struct State {
+    pub evolution: Option<crate::home_evolution::Home>,
     /// The focused card's lift and the scrolling of Home and its rows (`motion.rs`).
     pub motion: crate::motion::Motion,
     pub page: Page,
@@ -492,6 +541,7 @@ pub struct State {
 impl State {
     pub fn new(preferences: Preferences) -> Self {
         Self {
+            evolution: None,
             motion: crate::motion::Motion::default(),
             page: Page::Home,
             focus: Target::Nav(0),
@@ -719,6 +769,7 @@ impl State {
     /// Advances the shared motion: Home's focused card lifts, and Home and its rows scroll to
     /// where navigation put them. Hit targets and navigation use the targets at once.
     pub fn animate(&mut self, dt: f32) {
+        self.evolution_tick(dt);
         use crate::motion::Lane;
         let home = self.page == Page::Home;
         let apps = self.page == Page::Apps;
@@ -815,9 +866,19 @@ impl State {
     /// Whether anything but a wallpaper fade moves: a fade waits for it, as it changes both of
     /// the fade's ends.
     pub fn animating_besides_wallpaper(&self) -> bool {
-        ((self.recents_open() || self.recents.visibility > 0.)
-            && (self.recents.visibility != if self.recents_open() { 1. } else { 0. }
-                || self.recents.cards_animating(self.pointer)))
+        (self.evolution_active()
+            && self.evolution.as_ref().is_some_and(|home| {
+                home.expansion.moving()
+                    || home.top_expansion.moving()
+                    || home.top_label.moving()
+                    || home.button_focus.iter().any(|t| t.moving())
+                    || ((!self.pointer || !home.pointer_in_cinema) && home.carousel.moving())
+                    || home.hover.is_some()
+                    || home.leave.is_some()
+            }))
+            || ((self.recents_open() || self.recents.visibility > 0.)
+                && (self.recents.visibility != if self.recents_open() { 1. } else { 0. }
+                    || self.recents.cards_animating(self.pointer)))
             || self.motion.animating()
             || self.panel_started.is_some()
             || self.menu_motion.is_some()
@@ -841,12 +902,17 @@ impl State {
         self.pressed = None;
         self.open(0);
         self.home_scroll = 0.;
-        self.focus = self.first_content();
+        if self.evolution.is_none() {
+            self.focus = self.first_content();
+        }
         pending
     }
 
     /// Home with Luma in front: the menu opens over the page, and Home again closes it.
     pub fn home_key(&mut self) -> Vec<Effect> {
+        if self.evolution.is_some() && self.page == Page::Home {
+            return self.return_home();
+        }
         if matches!(self.overlay, Some(Overlay::Menu { .. })) {
             self.close_menu();
             return vec![];
@@ -903,6 +969,9 @@ impl State {
 
     /// The menu over the page, on the page's own item; closing it returns to the focus it had.
     pub fn open_menu(&mut self) {
+        if self.evolution.is_some() && self.page == Page::Home {
+            return;
+        }
         let amount = self.menu_amount();
         let restore = if matches!(self.focus, Target::Nav(_) | Target::MenuInputs) {
             self.first_content()
@@ -1081,6 +1150,8 @@ impl State {
 
     pub fn open(&mut self, index: usize) {
         self.weather.cancel_search();
+        self.evolution_reconcile_dock();
+        let from_home = self.page == Page::Home;
         self.page = match index {
             1 => Page::Apps,
             2 => Page::Settings,
@@ -1098,6 +1169,35 @@ impl State {
         self.section = 0;
         self.panel_started = None;
         self.focus = self.first_content();
+        if let Some(home) = self.evolution.as_mut() {
+            home.moving_dock = None;
+            home.top_open = false;
+            home.top_expansion = crate::home_evolution::Tween::default();
+            home.pointer_in_cinema = false;
+            home.pointer_target = None;
+            home.dock_in_view = false;
+            home.rotation.reset();
+            home.rotation.paused = true;
+            if self.page == Page::Home {
+                let restore = home.return_action.take().filter(|_| !from_home);
+                home.expanded = false;
+                home.expansion = crate::home_evolution::Tween::default();
+                home.cancel_hover();
+                let dock = self.evolution_dock();
+                self.evolution_focus_dock(dock);
+                if let Some(action) = restore {
+                    let target = Target::EvolutionGlobal(action);
+                    if self.preferences.evolution_home.global_position
+                        == crate::home_evolution::GlobalPosition::Dock
+                    {
+                        self.evolution_focus_dock(target);
+                    } else {
+                        self.focus = target;
+                        self.evolution.as_mut().unwrap().dock_in_view = false;
+                    }
+                }
+            }
+        }
         self.dirty = true;
     }
 
@@ -1277,7 +1377,7 @@ impl State {
             .map(|control| control.target.clone())
     }
 
-    /// Returns whether this wheel event scrolled favorites, so a pending card press is cancelled.
+    /// Returns whether this wheel event was handled, so a pending press is cancelled.
     pub fn wheel_scroll(
         &mut self,
         controls: &[Control],
@@ -1285,6 +1385,9 @@ impl State {
         x: i32,
         y: i32,
     ) -> bool {
+        if self.evolution_active() {
+            return self.evolution_wheel(y);
+        }
         let backgrounds =
             self.page == Page::Settings && self.section == 1 && self.subpage.is_none();
         if backgrounds && position.is_some_and(|(x, y)| !self.backgrounds_viewport().contains(x, y))
@@ -1343,6 +1446,17 @@ impl State {
     }
 
     pub fn set_inventory(&mut self, next: Inventory, warning: Option<String>) {
+        if self.evolution_moving()
+            && self
+                .inventory
+                .apps
+                .iter()
+                .map(|app| &app.id)
+                .ne(next.apps.iter().map(|app| &app.id))
+        {
+            self.evolution_finish_move(false);
+        }
+        self.evolution_snapshot_dock_order();
         self.inventory.apps = next.apps;
         self.sync_custom_tiles();
         if let Some(warning) = warning {
@@ -1416,13 +1530,36 @@ impl State {
     }
 
     pub fn reconcile_focus(&mut self) {
+        self.evolution_reconcile_dock();
         if self.page == Page::Home {
             self.scroll_favorites(0.);
+        }
+        if self.evolution_active() {
+            self.evolution_reconcile_widgets();
+            if !self.pointer && matches!(self.focus, Target::App(_) | Target::EvolutionGlobal(_)) {
+                let items = self.evolution_dock_items();
+                if let Some(index) = items.iter().position(|item| *item == self.focus) {
+                    self.evolution_remember_dock(&items, index);
+                    self.evolution.as_mut().unwrap().dock_in_view = true;
+                }
+            }
+            if matches!(self.focus, Target::Input(_))
+                && !self
+                    .evolution_inputs()
+                    .iter()
+                    .any(|input| self.focus == Target::Input(input.id.clone()))
+            {
+                self.evolution_focus_dock(self.evolution_dock());
+            }
         }
         if let Target::App(id) = &self.focus
             && !self.apps().iter().any(|app| &app.id == id)
         {
-            self.focus = self.first_content();
+            if self.evolution_active() {
+                self.evolution_focus_dock(self.evolution_dock());
+            } else {
+                self.focus = self.first_content();
+            }
         }
         if let Target::Input(id) = &self.focus
             && !self
@@ -1442,6 +1579,7 @@ impl State {
 
     pub fn first_content(&self) -> Target {
         match self.page {
+            Page::Home if self.evolution.is_some() => self.evolution_dock(),
             Page::Home => self
                 .apps()
                 .get(((self.home_scroll - 0.01).max(0.) / HOME_TILE_PITCH).ceil() as usize)
@@ -1477,6 +1615,9 @@ impl State {
     /// Remote focus is revealed after layout changes, including hide/reorder.
     /// Pointer paths deliberately do not call this method.
     pub fn reveal_focus(&mut self, controls: &[Control]) -> bool {
+        if self.evolution_active() {
+            return false;
+        }
         if matches!(self.overlay, Some(Overlay::Today { .. })) {
             return self.reveal_today_line(controls);
         }
@@ -1598,6 +1739,20 @@ impl State {
 
     /// Hover and pointer-down must not move the control before pointer-up.
     pub fn pointer_focus(&mut self, target: Target) {
+        if self.evolution_active() {
+            if let Target::EvolutionWidget(app) = target
+                && !self.evolution_widget_eligible(app)
+            {
+                return;
+            }
+            self.evolution_pointer(Some(&target), Instant::now());
+            if matches!(target, Target::App(_) | Target::EvolutionGlobal(_))
+                && self.evolution_dock_items().contains(&target)
+            {
+                let home = self.evolution.as_mut().unwrap();
+                home.last_dock = Some(target.clone());
+            }
+        }
         if !self.pointer {
             self.dirty = true;
         }
@@ -2098,12 +2253,27 @@ impl State {
     }
 
     fn close_subpage(&mut self) {
+        if let Some(Subpage::Dock {
+            confirming_restore, ..
+        }) = &mut self.subpage
+            && *confirming_restore
+        {
+            *confirming_restore = false;
+            self.focus = Target::DockRestore;
+            self.pointer = false;
+            self.dirty = true;
+            return;
+        }
         if self.subpage == Some(Subpage::WeatherLocation) {
             self.weather.cancel_search();
         }
         self.panel_started = None;
         self.pointer = false;
         self.focus = match self.subpage.take() {
+            Some(Subpage::Navigation) => Target::Setting(NAVIGATION_ROW),
+            Some(Subpage::Dock { .. }) => Target::Setting(DOCK_ROW),
+            Some(Subpage::Cinema { .. }) => Target::Setting(CINEMA_ROW),
+            Some(Subpage::About) => Target::Setting(ABOUT_ROW),
             Some(Subpage::AppNames) => Target::Setting(0),
             Some(Subpage::Greeting) => Target::Widget(0),
             Some(Subpage::Date) => Target::Widget(4),
@@ -2151,6 +2321,74 @@ impl State {
         };
         self.scroll = 0.;
         self.dirty = true;
+    }
+
+    fn step_dock_scale(&mut self, increase: bool) {
+        if let Some(Subpage::Dock {
+            scale,
+            confirming_restore: false,
+            ..
+        }) = &mut self.subpage
+        {
+            *scale = scale.stepped(increase);
+            self.dirty = true;
+        }
+    }
+
+    fn step_dock_horizontal(&mut self, increase: bool) {
+        if let Some(Subpage::Dock {
+            horizontal,
+            confirming_restore: false,
+            ..
+        }) = &mut self.subpage
+        {
+            *horizontal = horizontal.stepped(increase);
+            self.dirty = true;
+        }
+    }
+
+    pub fn dock_settings_saved(&mut self, scale: DockScale, horizontal: DockHorizontal) {
+        self.preferences.evolution_home.cinema_dock_scale = scale;
+        self.preferences.evolution_home.dock_horizontal = horizontal;
+        self.close_subpage();
+    }
+
+    fn leave_subpage(&mut self) {
+        if let Some(Subpage::Cinema { scale, prompt }) = &mut self.subpage {
+            let (next_prompt, focus) = match *prompt {
+                Some(CinemaScalePrompt::Restore) => (None, Target::CinemaRestore),
+                Some(CinemaScalePrompt::Unsaved) => (None, Target::CinemaScale),
+                None if *scale != self.preferences.evolution_home.compact_cinema_scale => {
+                    (Some(CinemaScalePrompt::Unsaved), Target::CinemaContinue)
+                }
+                None => {
+                    self.close_subpage();
+                    return;
+                }
+            };
+            *prompt = next_prompt;
+            self.focus = focus;
+            self.pointer = false;
+            self.dirty = true;
+            return;
+        }
+        self.close_subpage();
+    }
+
+    fn step_cinema_scale(&mut self, increase: bool) {
+        if let Some(Subpage::Cinema {
+            scale,
+            prompt: None,
+        }) = &mut self.subpage
+        {
+            *scale = scale.stepped(increase);
+            self.dirty = true;
+        }
+    }
+
+    pub fn cinema_scale_saved(&mut self, scale: CinemaScale) {
+        self.preferences.evolution_home.compact_cinema_scale = scale;
+        self.close_subpage();
     }
 
     /// Gives a team Liquipedia has no logo for the feeds server's copy of HLTV's, until
@@ -2217,6 +2455,10 @@ impl State {
     pub fn direction(&mut self, direction: Direction, controls: &[Control]) -> Vec<Effect> {
         self.pointer = false;
         self.dirty = true;
+        if self.evolution_active() && self.moving.is_none() {
+            self.evolution_direction(direction);
+            return vec![];
+        }
         if self.recents_open() {
             return self.recent_direction(direction);
         }
@@ -2343,7 +2585,59 @@ impl State {
                     return vec![];
                 }
             }
+            if matches!(self.focus, Target::DockScale | Target::DockScaleStep(_))
+                && matches!(direction, Direction::Left | Direction::Right)
+            {
+                self.step_dock_scale(matches!(direction, Direction::Right));
+                self.focus = Target::DockScale;
+                return vec![];
+            }
+            if matches!(
+                self.focus,
+                Target::DockHorizontal | Target::DockHorizontalStep(_)
+            ) && matches!(direction, Direction::Left | Direction::Right)
+            {
+                self.step_dock_horizontal(matches!(direction, Direction::Right));
+                self.focus = Target::DockHorizontal;
+                return vec![];
+            }
+            if matches!(self.focus, Target::CinemaScale | Target::CinemaScaleStep(_))
+                && matches!(direction, Direction::Left | Direction::Right)
+            {
+                self.step_cinema_scale(matches!(direction, Direction::Right));
+                self.focus = Target::CinemaScale;
+                return vec![];
+            }
             let setting_rows: Option<&[Target]> = match self.subpage {
+                Some(Subpage::Dock {
+                    confirming_restore: true,
+                    ..
+                }) => Some(&[Target::DockConfirmRestore, Target::DockCancel]),
+                Some(Subpage::Dock { .. }) => Some(&[
+                    Target::DockScale,
+                    Target::DockHorizontal,
+                    Target::DockApply,
+                    Target::DockRestore,
+                    Target::DockCancel,
+                ]),
+                Some(Subpage::Cinema {
+                    prompt: Some(CinemaScalePrompt::Restore),
+                    ..
+                }) => Some(&[Target::CinemaConfirmRestore, Target::CinemaCancel]),
+                Some(Subpage::Cinema {
+                    prompt: Some(CinemaScalePrompt::Unsaved),
+                    ..
+                }) => Some(&[
+                    Target::CinemaApply,
+                    Target::CinemaDiscard,
+                    Target::CinemaContinue,
+                ]),
+                Some(Subpage::Cinema { .. }) => Some(&[
+                    Target::CinemaScale,
+                    Target::CinemaApply,
+                    Target::CinemaRestore,
+                    Target::CinemaCancel,
+                ]),
                 Some(Subpage::Greeting) => Some(&[
                     Target::GreetingToggle,
                     Target::GreetingName,
@@ -2355,10 +2649,18 @@ impl State {
                 _ => None,
             };
             if let Some(rows) = setting_rows
-                && let Some(index) = rows.iter().position(|target| *target == self.focus)
+                && let Some(index) = rows.iter().position(|target| {
+                    *target == self.focus
+                        || (*target == Target::DockScale
+                            && matches!(self.focus, Target::DockScaleStep(_)))
+                        || (*target == Target::DockHorizontal
+                            && matches!(self.focus, Target::DockHorizontalStep(_)))
+                        || (*target == Target::CinemaScale
+                            && matches!(self.focus, Target::CinemaScaleStep(_)))
+                })
             {
                 match direction {
-                    Direction::Left => self.close_subpage(),
+                    Direction::Left => self.leave_subpage(),
                     Direction::Up => self.focus(
                         if index == 0 {
                             self.focus.clone()
@@ -2392,6 +2694,7 @@ impl State {
                         | Subpage::TimeFormat
                         | Subpage::Temperature
                         | Subpage::TextRendering
+                        | Subpage::Navigation
                         | Subpage::HomeTakeover,
                     ) => 2,
                     Some(Subpage::Language) => Language::ALL.len(),
@@ -2493,7 +2796,7 @@ impl State {
             }
             if matches!(
                 self.focus,
-                Target::Setting(0 | 1 | 4 | 7 | INTERFACE_SCALE_ROW)
+                Target::Setting(0 | 1 | 4 | 7 | INTERFACE_SCALE_ROW | DOCK_ROW | CINEMA_ROW)
                     | Target::Widget(_)
                     | Target::InputMode(_)
                     | Target::WeatherLocation
@@ -2857,6 +3160,12 @@ impl State {
         if self.overlay.is_some() || self.moving.is_some() {
             return;
         }
+        if self.evolution_active() && matches!(self.focus, Target::EvolutionGlobal(_)) {
+            if !self.evolution_moving() {
+                self.evolution_start_move(self.focus.clone());
+            }
+            return;
+        }
         if let Target::Background(index) = self.focus {
             if let Some(id) = self.background_id(index).map(str::to_owned) {
                 self.overlay = Some(Overlay::BackgroundOptions {
@@ -2917,6 +3226,7 @@ impl State {
             // Refresh is read-only, and also clears a stale card after late removal.
             return vec![Effect::Refresh];
         }
+        self.evolution_snapshot_dock_order();
         let old_ids: Vec<_> = self.apps().iter().map(|app| app.id.clone()).collect();
         let index = old_ids.iter().position(|item| item == &id).unwrap_or(0);
         let mut favorites = self.preferences.favorites(&self.inventory.apps);
@@ -2933,7 +3243,7 @@ impl State {
             self.panel_started = None;
             self.focus = Target::App(id.clone());
         }
-        if self.focus == Target::App(id) {
+        if self.focus == Target::App(id) && !self.evolution_active() {
             self.focus = self
                 .apps()
                 .get(index.min(self.apps().len().saturating_sub(1)))
@@ -3071,6 +3381,7 @@ impl State {
     /// Applies the tile list edited on a phone or computer. New tiles join
     /// the end of the Home favorites and removed ones leave favorites and hidden apps.
     pub fn replace_tiles(&mut self, tiles: Vec<CustomTile>) -> Vec<Effect> {
+        self.evolution_snapshot_dock_order();
         let removed: Vec<_> = self
             .preferences
             .custom_tiles
@@ -3113,6 +3424,7 @@ impl State {
             }
             self.preferences.favorites = Some(favorites);
         }
+        self.evolution_reconcile_dock();
         vec![Effect::Save]
     }
 
@@ -3259,6 +3571,46 @@ impl State {
     }
 
     pub fn activate(&mut self) -> Vec<Effect> {
+        if self.evolution_active() {
+            if self.evolution_moving() {
+                return self.evolution_finish_move(true);
+            }
+            match &self.focus {
+                Target::EvolutionGlobal(action) => {
+                    self.evolution.as_mut().unwrap().return_action = Some(*action);
+                    self.open(action.index() + 1);
+                    return vec![];
+                }
+                Target::EvolutionContent(id) => {
+                    if let Some(index) = id.rsplit(':').next().and_then(|n| n.parse::<usize>().ok())
+                        && index < crate::home_evolution::CONTENTS.len()
+                    {
+                        let home = self.evolution.as_mut().unwrap();
+                        home.selected = home.first
+                            + (index as i64 - home.first)
+                                .rem_euclid(crate::home_evolution::CONTENTS.len() as i64);
+                        home.cancel_hover();
+                    }
+                    self.notice = Some((
+                        "Conteúdo fictício do preview — sem reprodução ou serviço conectado".into(),
+                        Instant::now(),
+                    ));
+                    self.dirty = true;
+                    return vec![];
+                }
+                Target::EvolutionArea(_) => return vec![],
+                Target::EvolutionWidget(app) => {
+                    self.evolution_activate_widget(*app);
+                    return vec![];
+                }
+                Target::Input(id)
+                    if !self.evolution_inputs().iter().any(|input| &input.id == id) =>
+                {
+                    return vec![];
+                }
+                _ => {}
+            }
+        }
         if matches!(self.overlay, Some(Overlay::Menu { .. })) {
             return self.menu_activate();
         }
@@ -3316,8 +3668,12 @@ impl State {
                     && let Some(Overlay::Options { id, restore }) = self.overlay.take()
                 {
                     self.panel_started = None;
-                    self.focus = restore;
-                    self.moving = Some(id);
+                    if self.evolution.is_some() {
+                        self.evolution_start_move(restore);
+                    } else {
+                        self.focus = restore;
+                        self.moving = Some(id);
+                    }
                     self.notice = None;
                 }
             }
@@ -3709,6 +4065,41 @@ impl State {
             }
             Target::Setting(index) => {
                 match index {
+                    DOCK_ROW if self.evolution.is_some() => {
+                        self.subpage = Some(Subpage::Dock {
+                            scale: self.preferences.evolution_home.cinema_dock_scale,
+                            horizontal: self.preferences.evolution_home.dock_horizontal,
+                            confirming_restore: false,
+                        });
+                        self.focus = Target::DockScale;
+                        self.scroll = 0.;
+                        return vec![];
+                    }
+                    CINEMA_ROW if self.evolution.is_some() => {
+                        self.subpage = Some(Subpage::Cinema {
+                            scale: self.preferences.evolution_home.compact_cinema_scale,
+                            prompt: None,
+                        });
+                        self.focus = Target::CinemaScale;
+                        self.scroll = 0.;
+                        return vec![];
+                    }
+                    NAVIGATION_ROW if self.evolution.is_some() => {
+                        self.subpage = Some(Subpage::Navigation);
+                        self.focus =
+                            Target::Choice(self.preferences.evolution_home.global_position.index());
+                        self.scroll = 0.;
+                        return vec![];
+                    }
+                    ABOUT_ROW if self.evolution.is_some() => {
+                        self.subpage = Some(Subpage::About);
+                        self.focus = Target::CloseDialog;
+                        self.scroll = 0.;
+                        return vec![];
+                    }
+                    TV_SETTINGS_ROW if self.evolution.is_some() => {
+                        return vec![Effect::Launch("com.palm.app.settings".into())];
+                    }
                     0 => {
                         self.subpage = Some(Subpage::AppNames);
                         self.focus = Target::AppNamesHome;
@@ -3864,8 +4255,89 @@ impl State {
                     InputMode::Auto => 2,
                 });
             }
+            Target::DockScaleStep(increase) => self.step_dock_scale(increase),
+            Target::DockHorizontalStep(increase) => self.step_dock_horizontal(increase),
+            Target::DockApply => {
+                if let Some(Subpage::Dock {
+                    scale,
+                    horizontal,
+                    confirming_restore: false,
+                }) = self.subpage
+                {
+                    return vec![Effect::SaveDockSettings { scale, horizontal }];
+                }
+            }
+            Target::DockRestore => {
+                if let Some(Subpage::Dock {
+                    confirming_restore, ..
+                }) = &mut self.subpage
+                {
+                    *confirming_restore = true;
+                    self.focus = Target::DockCancel;
+                    self.pointer = false;
+                }
+            }
+            Target::DockConfirmRestore => {
+                if let Some(Subpage::Dock {
+                    scale,
+                    confirming_restore,
+                    ..
+                }) = &mut self.subpage
+                    && *confirming_restore
+                {
+                    *scale = DockScale::default();
+                    *confirming_restore = false;
+                    self.focus = Target::DockScale;
+                    self.pointer = false;
+                }
+            }
+            Target::DockCancel if matches!(self.subpage, Some(Subpage::Dock { .. })) => {
+                self.close_subpage();
+            }
+            Target::CinemaScaleStep(increase) => self.step_cinema_scale(increase),
+            Target::CinemaApply => {
+                if let Some(Subpage::Cinema { scale, prompt }) = self.subpage
+                    && prompt != Some(CinemaScalePrompt::Restore)
+                {
+                    return vec![Effect::SaveCinemaScale(scale)];
+                }
+            }
+            Target::CinemaRestore => {
+                if let Some(Subpage::Cinema { prompt, .. }) = &mut self.subpage {
+                    *prompt = Some(CinemaScalePrompt::Restore);
+                    self.focus = Target::CinemaCancel;
+                    self.pointer = false;
+                }
+            }
+            Target::CinemaConfirmRestore => {
+                if let Some(Subpage::Cinema { scale, prompt }) = &mut self.subpage
+                    && *prompt == Some(CinemaScalePrompt::Restore)
+                {
+                    *scale = CinemaScale::default();
+                    *prompt = None;
+                    self.focus = Target::CinemaScale;
+                    self.pointer = false;
+                }
+            }
+            Target::CinemaCancel
+                if matches!(self.subpage, Some(Subpage::Cinema { prompt: None, .. })) =>
+            {
+                self.close_subpage();
+            }
+            Target::CinemaCancel | Target::CinemaContinue
+                if matches!(self.subpage, Some(Subpage::Cinema { .. })) =>
+            {
+                self.leave_subpage();
+            }
+            Target::CinemaDiscard if matches!(self.subpage, Some(Subpage::Cinema { .. })) => {
+                self.close_subpage();
+            }
             Target::Choice(index) => {
                 match self.subpage.clone() {
+                    Some(Subpage::Navigation) => {
+                        self.preferences.evolution_home.global_position =
+                            crate::home_evolution::GlobalPosition::ALL[index.min(1)];
+                    }
                     Some(Subpage::ClockFormat) => self.preferences.hour_24 = index == 1,
                     Some(Subpage::TimeFormat) => self.preferences.show_seconds = index == 1,
                     Some(Subpage::DateFormat) => {
@@ -3937,11 +4409,15 @@ impl State {
                         | Subpage::Weather
                         | Subpage::Shortcuts
                         | Subpage::Inputs
+                        | Subpage::Dock { .. }
+                        | Subpage::Cinema { .. }
                         | Subpage::Crypto,
                     ) => {
                         return vec![];
                     }
-                    Some(Subpage::Cs2 | Subpage::Shows | Subpage::Apps) => return vec![],
+                    Some(Subpage::Cs2 | Subpage::Shows | Subpage::Apps | Subpage::About) => {
+                        return vec![];
+                    }
                     None => return vec![],
                 }
                 self.close_subpage();
@@ -3968,6 +4444,7 @@ impl State {
                 let Some(Overlay::Options { id, restore }) = self.overlay.take() else {
                     return vec![];
                 };
+                self.evolution_snapshot_dock_order();
                 self.panel_started = None;
                 let old_ids: Vec<_> = self.apps().iter().map(|a| a.id.clone()).collect();
                 let old_index = old_ids.iter().position(|item| item == &id).unwrap_or(0);
@@ -4018,7 +4495,9 @@ impl State {
                 }
                 self.focus = restore;
                 self.pointer = false;
-                if let Target::App(id) = &self.focus {
+                if self.evolution_active() {
+                    self.reconcile_focus();
+                } else if let Target::App(id) = &self.focus {
                     let apps = self.apps();
                     if !apps.iter().any(|app| &app.id == id) {
                         self.focus = apps
@@ -4026,6 +4505,9 @@ impl State {
                             .map(|app| Target::App(app.id.clone()))
                             .unwrap_or_else(|| self.first_content());
                     }
+                }
+                if !self.evolution_active() {
+                    self.evolution_reconcile_dock();
                 }
                 return if index < 2 {
                     vec![Effect::Save]
@@ -4084,6 +4566,23 @@ impl State {
     pub fn back(&mut self) -> Vec<Effect> {
         self.pointer = false;
         self.dirty = true;
+        if self.evolution_active() && self.evolution_moving() {
+            return self.evolution_finish_move(false);
+        }
+        if self.evolution_active()
+            && self.moving.is_none()
+            && matches!(
+                self.focus,
+                Target::EvolutionContent(_) | Target::EvolutionWidget(_) | Target::EvolutionArea(_)
+            )
+        {
+            self.evolution_focus_dock(self.evolution_dock());
+            let home = self.evolution.as_mut().unwrap();
+            home.cancel_hover();
+            home.expanded = false;
+            home.top_open = false;
+            return vec![];
+        }
         if matches!(self.overlay, Some(Overlay::Menu { .. })) {
             self.close_menu();
             return vec![];
@@ -4169,7 +4668,7 @@ impl State {
             return self.commit_text_input();
         }
         if self.page == Page::Settings && self.subpage.is_some() {
-            self.close_subpage();
+            self.leave_subpage();
             return vec![];
         }
         if self.page == Page::Settings && !matches!(self.focus, Target::Sidebar(_)) {

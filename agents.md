@@ -7,6 +7,25 @@ Luma is a native Rust/SDL2/OpenGL ES 2 launcher for rooted LG webOS TVs. Rust so
 the host SVG compiler in `tools/vector-assets/`, packaging/tooling in `tools/`, and desktop smoke
 scripts in `tests/`. There is no React/JSX/browser application. Read `development.md` for details.
 
+## Canonical project source
+
+The Google Drive configured as this project's source is canonical for Luma Evolution context and
+UX specifications. Before implementing or changing a decision, verify the folder and file IDs and
+consult the latest originals there. Use local reports for evidence and implementation history.
+Report an access blocker before editing when the current originals are unavailable.
+
+| Source                  | Canonical ID                        | Original                                                                                                  |
+| ----------------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| LGTV project source     | `1P0N3O1oXIyOGQZzkWMoGMUgs-kioNXcA` | [LGTV](https://drive.google.com/drive/folders/1P0N3O1oXIyOGQZzkWMoGMUgs-kioNXcA)                          |
+| Documentation subfolder | `1mKad_DYA6zFIldXw_UVyBQHGaGm26Ggs` | [gpt-context-lg-luma-evolution](https://drive.google.com/drive/folders/1mKad_DYA6zFIldXw_UVyBQHGaGm26Ggs) |
+| Home UX specification   | `1y2W1ncepcXDraTQCp4sZvHtrcNQRYNaK` | [UX_SPEC_HOME.md](https://drive.google.com/file/d/1y2W1ncepcXDraTQCp4sZvHtrcNQRYNaK/view)                 |
+| Project context         | `1QyGzw7AnpTorWgDgomiDD6ThUOxasY6a` | [PROJECT_CONTEXT.md](https://drive.google.com/file/d/1QyGzw7AnpTorWgDgomiDD6ThUOxasY6a/view)              |
+
+Use the originals for decisions and reference them from repository documentation. Update the
+Drive originals only when the task authorizes a Drive write.
+
+## Development workflow
+
 Use pnpm, Oxlint and Oxfmt for build tools; Cargo/rustfmt/Clippy for Rust. `nix develop` supplies
 pinned Rust 1.93, ARMv7 std, Node 24, pnpm 10.34.5, SDL2, woff2 and Python/fontTools. The webOS
 SDK is separate: `pnpm sdk`, then set `WEBOS_NDK` to `.build/toolchain/arm-webos-linux-gnueabi_sdk-buildroot`.

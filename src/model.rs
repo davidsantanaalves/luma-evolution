@@ -413,6 +413,7 @@ impl DateFormat {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Preferences {
+    pub evolution_home: crate::home_evolution::Preferences,
     pub favorites: Option<Vec<String>>,
     pub custom_tiles: Vec<CustomTile>,
     pub hidden: Vec<String>,
@@ -500,6 +501,7 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            evolution_home: crate::home_evolution::Preferences::default(),
             favorites: None,
             custom_tiles: vec![],
             hidden: vec![],

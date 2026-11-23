@@ -4,9 +4,9 @@ use crate::{
     model::{App, BACKGROUNDS, CATEGORIES, Input, InputMode, UiSize},
     renderer::{Color, Draw, TextStyle, WHITE},
     state::{
-        APPS_COLUMNS, Control, HOME_FADE_LEFT, HOME_FADE_RIGHT, HOME_STRIP_LEFT, HOME_STRIP_RIGHT,
-        HOME_TILE_PITCH, HOME_TILE_WIDTH, HOMEBREW_UPDATES_ROW, KEYS, Overlay, Page, Rect,
-        SYSTEM_SECTION, State, Subpage, Target, TextField, WIDGETS_SECTION,
+        APPS_COLUMNS, CinemaScalePrompt, Control, HOME_FADE_LEFT, HOME_FADE_RIGHT, HOME_STRIP_LEFT,
+        HOME_STRIP_RIGHT, HOME_TILE_PITCH, HOME_TILE_WIDTH, HOMEBREW_UPDATES_ROW, KEYS, Overlay,
+        Page, Rect, SYSTEM_SECTION, State, Subpage, Target, TextField, WIDGETS_SECTION,
     },
     weather::{self, Unit},
 };
@@ -32,6 +32,8 @@ const RECENTS_BACKDROP_OPACITY: f32 = 0.86;
 mod cs2_icons;
 #[path = "cs2-live-view.rs"]
 mod cs2_live_view;
+#[path = "home-evolution-view.rs"]
+mod home_evolution_view;
 #[path = "recents-view.rs"]
 mod recents_view;
 
@@ -966,9 +968,16 @@ pub fn scene_on(
     let viewport = state.content_viewport();
     let main_bottom = viewport.y + viewport.h;
     if state.page == Page::Home {
-        out.draw.push(Draw::Clip(Some(viewport)));
+        out.draw.push(Draw::Clip(Some(if state.evolution.is_some() {
+            SCREEN
+        } else {
+            viewport
+        })));
     }
     match state.page {
+        Page::Home if state.evolution.is_some() => {
+            home_evolution_view::render(&mut out, state, assets, now)
+        }
         Page::Home => home(&mut out, state, assets, now),
         Page::Apps => library(&mut out, state, assets),
         Page::Settings => settings(&mut out, state, assets),
@@ -1012,7 +1021,9 @@ pub fn scene_on(
     out.draw.push(Draw::EdgeFade(None));
     out.draw.push(Draw::Clip(None));
     let (draws, controls) = (out.draw.len(), out.controls.len());
-    header(&mut out, state, assets, now);
+    if state.page != Page::Home || state.evolution.is_none() {
+        header(&mut out, state, assets, now);
+    }
     out.slide(draws, controls, state.chrome_offset());
     out.ground = out.draw.len();
     if let Some(
@@ -1714,6 +1725,15 @@ fn caption_scale(state: &State) -> f32 {
 }
 
 fn brand_mark(out: &mut Scene, assets: &Assets, app: &App, rect: Rect, language: Language) {
+    let square = rect.h >= rect.w * 0.9;
+    let rect = if square {
+        // Retain the card's full background. Lay out the existing mark in a landscape area
+        // centered inside it so long app names stay on a single line.
+        let height = rect.w / 1.6;
+        Rect::new(rect.x, rect.y + (rect.h - height) / 2., rect.w, height)
+    } else {
+        rect
+    };
     let scale = rect.h / FACE_HEIGHT;
     let rect = Rect::new(
         rect.x / scale,
@@ -1785,8 +1805,13 @@ fn brand_mark(out: &mut Scene, assets: &Assets, app: &App, rect: Rect, language:
             } else {
                 text(24., 500, -0.035).leading(1.2)
             };
-            let w = (assets.width(label, font) + 54.4).min(rect.w - 32.);
             let label_w = rect.w - 54.4 - 32.;
+            let font = if square {
+                assets.fit_text(label, font, label_w)
+            } else {
+                font
+            };
+            let w = (assets.width(label, font) + 54.4).min(rect.w - 32.);
             let label_h =
                 (assets.lines(label, font, label_w) as f32 * font.size * font.line_height)
                     .min(rect.h - 32.);
@@ -6312,6 +6337,12 @@ fn preview_frame(out: &mut Scene, state: &State) {
         region: preview_region(state),
     });
     out.border(PREVIEW, 18., 1., c(0xffffff, 0.14));
+    if matches!(
+        state.subpage,
+        Some(Subpage::Dock { .. } | Subpage::Cinema { .. })
+    ) {
+        return;
+    }
     out.text(
         language.t("previewHint"),
         Rect::new(PREVIEW.x, PREVIEW.y + PREVIEW.h + 24., PREVIEW.w, 60.),
@@ -6377,7 +6408,44 @@ pub fn home_preview(scene: &mut Scene, state: &mut State, assets: &Assets, now: 
         state.pressed.take(),
         state.moving.take(),
     );
+    let dock_preview = match (&state.subpage, &mut state.evolution) {
+        (Some(Subpage::Dock { scale, .. }), Some(home)) => Some((
+            std::mem::replace(
+                &mut state.preferences.evolution_home.cinema_dock_scale,
+                *scale,
+            ),
+            std::mem::replace(&mut home.expansion.value, 1.),
+            std::mem::replace(&mut home.top_expansion.value, 0.),
+            std::mem::replace(&mut home.inputs_revealed, false),
+        )),
+        _ => None,
+    };
+    let cinema_preview = match (&state.subpage, &mut state.evolution) {
+        (Some(Subpage::Cinema { scale, .. }), Some(home)) => Some((
+            home.cinema_scale_override.replace(*scale),
+            std::mem::replace(&mut home.expansion.value, 0.),
+            std::mem::replace(&mut home.top_expansion.value, 0.),
+            std::mem::replace(&mut home.inputs_revealed, false),
+        )),
+        _ => None,
+    };
     let home = self::scene(state, assets, now);
+    if let (Some(home), Some(saved)) = (&mut state.evolution, dock_preview) {
+        (
+            state.preferences.evolution_home.cinema_dock_scale,
+            home.expansion.value,
+            home.top_expansion.value,
+            home.inputs_revealed,
+        ) = saved;
+    }
+    if let (Some(home), Some(saved)) = (&mut state.evolution, cinema_preview) {
+        (
+            home.cinema_scale_override,
+            home.expansion.value,
+            home.top_expansion.value,
+            home.inputs_revealed,
+        ) = saved;
+    }
     (
         state.page,
         state.focus,
@@ -6497,10 +6565,21 @@ const SECTIONS: [(&str, &str); 4] = [
     ("system", "tv"),
 ];
 
+fn settings_section_key(state: &State, index: usize) -> &'static str {
+    if index == 0 && state.evolution.is_some() {
+        "evolutionInterface"
+    } else {
+        SECTIONS[index].0
+    }
+}
+
 /// The page's title: the section, then the open subpage's path ("Widgets › Weather").
 fn breadcrumb(state: &State) -> Vec<&str> {
     let language = state.preferences.language;
-    let mut path = vec![language.t(SECTIONS[state.section.min(SECTIONS.len() - 1)].0)];
+    let mut path = vec![language.t(settings_section_key(
+        state,
+        state.section.min(SECTIONS.len() - 1),
+    ))];
     match &state.subpage {
         Some(Subpage::DateFormat) => path.extend([language.t("date"), language.t("dateFormat")]),
         Some(Subpage::LampaFeed) => path.extend([language.t("lampa"), language.t("lampaFeed")]),
@@ -6537,6 +6616,10 @@ fn breadcrumb(state: &State) -> Vec<&str> {
             Subpage::Apps => language.t("appsWidget"),
             Subpage::Language => language.t("language"),
             Subpage::Appearance => language.t("uiScale"),
+            Subpage::Navigation => language.t("evolutionNavigation"),
+            Subpage::Dock { .. } => language.t("evolutionDock"),
+            Subpage::Cinema { .. } => language.t("evolutionCinema"),
+            Subpage::About => language.t("evolutionAbout"),
             Subpage::TextRendering => language.t("textRendering"),
             Subpage::HomeTakeover => language.t("homeTakeover"),
             _ => "",
@@ -6612,7 +6695,7 @@ fn settings_sidebar(out: &mut Scene, state: &State, assets: &Assets) {
     if opening {
         out.draw.push(Draw::Clip(Some(panel)));
     }
-    for (index, (key, icon)) in SECTIONS.into_iter().enumerate() {
+    for (index, (_, icon)) in SECTIONS.into_iter().enumerate() {
         let rect = Rect::new(
             SAFE_X + 8.,
             CONTENT_TOP + 8. + index as f32 * SIDEBAR_PITCH,
@@ -6645,7 +6728,7 @@ fn settings_sidebar(out: &mut Scene, state: &State, assets: &Assets) {
             ink,
         );
         if open > 0. {
-            let label = language.t(key);
+            let label = language.t(settings_section_key(state, index));
             // Measured at the open width, so the names do not shrink while the sidebar opens.
             let room = SIDEBAR_EXPANDED - 16. - 76.;
             let mut color = ink;
@@ -6665,11 +6748,235 @@ fn settings_sidebar(out: &mut Scene, state: &State, assets: &Assets) {
     }
 }
 
+fn dock_settings(
+    out: &mut Scene,
+    state: &State,
+    assets: &Assets,
+    scale: crate::home_evolution::DockScale,
+    horizontal: crate::home_evolution::DockHorizontal,
+    confirming_restore: bool,
+) {
+    let normal = [
+        (Target::DockScale, "evolutionDockScale"),
+        (Target::DockHorizontal, "evolutionDockHorizontal"),
+        (Target::DockApply, "evolutionApply"),
+        (Target::DockRestore, "evolutionRestoreDefaults"),
+        (Target::DockCancel, "cancel"),
+    ];
+    let confirmation = [
+        (Target::DockConfirmRestore, "evolutionRestoreDefaults"),
+        (Target::DockCancel, "cancel"),
+    ];
+    settings_steppers(
+        out,
+        state,
+        assets,
+        if confirming_restore {
+            &confirmation
+        } else {
+            &normal
+        },
+        confirming_restore.then_some("evolutionDockRestorePrompt"),
+        &[
+            SettingStepper {
+                target: Target::DockScale,
+                step: Target::DockScaleStep,
+                label: &scale.label(),
+            },
+            SettingStepper {
+                target: Target::DockHorizontal,
+                step: Target::DockHorizontalStep,
+                label: state.preferences.language.t(horizontal.label()),
+            },
+        ],
+    );
+}
+
+fn cinema_settings(
+    out: &mut Scene,
+    state: &State,
+    assets: &Assets,
+    scale: crate::home_evolution::CinemaScale,
+    prompt: Option<CinemaScalePrompt>,
+) {
+    let (rows, prompt_key): (&[_], _) = match prompt {
+        None => (
+            &[
+                (Target::CinemaScale, "evolutionCinemaScale"),
+                (Target::CinemaApply, "evolutionApply"),
+                (Target::CinemaRestore, "evolutionRestoreDefaults"),
+                (Target::CinemaCancel, "cancel"),
+            ],
+            None,
+        ),
+        Some(CinemaScalePrompt::Restore) => (
+            &[
+                (Target::CinemaConfirmRestore, "evolutionRestoreDefaults"),
+                (Target::CinemaCancel, "cancel"),
+            ],
+            Some("evolutionCinemaRestorePrompt"),
+        ),
+        Some(CinemaScalePrompt::Unsaved) => (
+            &[
+                (Target::CinemaApply, "evolutionApply"),
+                (Target::CinemaDiscard, "evolutionDiscard"),
+                (Target::CinemaContinue, "evolutionContinueEditing"),
+            ],
+            Some("evolutionCinemaUnsavedPrompt"),
+        ),
+    };
+    settings_steppers(
+        out,
+        state,
+        assets,
+        rows,
+        prompt_key,
+        &[SettingStepper {
+            target: Target::CinemaScale,
+            step: Target::CinemaScaleStep,
+            label: &scale.label(),
+        }],
+    );
+}
+
+struct SettingStepper<'a> {
+    target: Target,
+    step: fn(bool) -> Target,
+    label: &'a str,
+}
+
+fn settings_steppers(
+    out: &mut Scene,
+    state: &State,
+    assets: &Assets,
+    rows: &[(Target, &str)],
+    prompt: Option<&str>,
+    steppers: &[SettingStepper<'_>],
+) {
+    let language = state.preferences.language;
+    let mut y = LIST_TOP - state.scroll;
+    if let Some(prompt) = prompt {
+        out.text(
+            language.t(prompt),
+            Rect::new(LIST_X, y + 10., LIST_WIDTH, 60.),
+            text(type_scale::SECONDARY, 500, 0.).shadow(),
+            WHITE,
+            false,
+        );
+        y += ROW_HEIGHT;
+    }
+    for &(ref target, key) in rows {
+        let rect = Rect::new(LIST_X, y, LIST_WIDTH, ROW_HEIGHT);
+        row(
+            out,
+            state,
+            assets,
+            Row {
+                target: target.clone(),
+                rect,
+                title: language.t(key),
+                icon: None,
+                value: None,
+                description: None,
+                selected: false,
+                chevron: false,
+            },
+        );
+        if let Some(stepper) = steppers.iter().find(|stepper| stepper.target == *target) {
+            let right = rect.x + rect.w;
+            let ink = if state.page_focus() == target {
+                c(0x2c2c2c, 1.)
+            } else {
+                WHITE
+            };
+            let (left_arrow, value_x, value_width) = match target {
+                // Keep the full gap between the step buttons for 100%.
+                Target::DockScale => (163., 121., 66.),
+                Target::DockHorizontal => (295., 251., 196.),
+                _ => (163., 119., 60.),
+            };
+            let value_rect = Rect::new(right - value_x, rect.y + 20., value_width, 29.);
+            let style = text(type_scale::SECONDARY, 550, 0.);
+            let style = if *target == Target::DockScale {
+                style
+            } else {
+                assets.fit_text(stepper.label, style, value_rect.w)
+            };
+            out.text(stepper.label, value_rect, style, ink, true);
+            for (increase, left, icon) in [
+                (false, right - left_arrow, "left"),
+                (true, right - 55., "right"),
+            ] {
+                let arrow = Rect::new(left, rect.y + 12., 42., 44.);
+                let target = (stepper.step)(increase);
+                if *state.page_focus() == target {
+                    out.shape(arrow, 8., c(0xffffff, 0.20));
+                }
+                out.icon(
+                    assets,
+                    icon,
+                    Rect::new(arrow.x + 11., arrow.y + 12., 20., 20.),
+                    ink,
+                );
+                out.control(target, arrow, true);
+            }
+        }
+        y += LIST_PITCH;
+    }
+}
+
 fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
     let language = state.preferences.language;
     let s = state.scroll;
     if let Some(subpage) = &state.subpage {
         let start = out.draw.len();
+        if let Subpage::Dock {
+            scale,
+            horizontal,
+            confirming_restore,
+        } = *subpage
+        {
+            dock_settings(out, state, assets, scale, horizontal, confirming_restore);
+            return;
+        }
+        if let Subpage::Cinema { scale, prompt } = *subpage {
+            cinema_settings(out, state, assets, scale, prompt);
+            return;
+        }
+        if *subpage == Subpage::About {
+            let panel = Rect::new(LIST_X, LIST_TOP, LIST_WIDTH, 170.);
+            out.glass(panel, 20.);
+            out.text(
+                "Luma Evolution",
+                Rect::new(panel.x + 24., panel.y + 20., panel.w - 48., 50.),
+                text(38., 650, 0.),
+                WHITE,
+                false,
+            );
+            out.text(
+                format!("v{} · Rust / SDL2 / OpenGL ES", assets.version),
+                Rect::new(panel.x + 24., panel.y + 84., panel.w - 48., 44.),
+                text(23., 400, 0.),
+                WHITE,
+                false,
+            );
+            row(
+                out,
+                state,
+                assets,
+                Row {
+                    target: Target::CloseDialog,
+                    rect: Rect::new(LIST_X, LIST_TOP + 190., LIST_WIDTH, ROW_HEIGHT),
+                    title: language.t("back"),
+                    icon: Some("left"),
+                    value: None,
+                    description: None,
+                    selected: false,
+                    chevron: false,
+                },
+            );
+            return;
+        }
         if matches!(
             subpage,
             Subpage::WeatherLocation
@@ -6706,6 +7013,20 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
             return;
         }
         let options: Vec<(&str, Option<&str>, bool)> = match subpage {
+            Subpage::Dock { .. } | Subpage::Cinema { .. } => {
+                unreachable!("Scale settings are drawn above the choice list")
+            }
+            Subpage::About => unreachable!("About is drawn above the choice list"),
+            Subpage::Navigation => crate::home_evolution::GlobalPosition::ALL
+                .into_iter()
+                .map(|position| {
+                    (
+                        position.label(language),
+                        None,
+                        position == state.preferences.evolution_home.global_position,
+                    )
+                })
+                .collect(),
             Subpage::LampaFeed => crate::model::LampaFeed::ALL
                 .iter()
                 .map(|feed| {
@@ -6866,7 +7187,13 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
     }
     match state.section {
         0 => {
-            let rows = [
+            let dock_scale = state.preferences.evolution_home.cinema_dock_scale.label();
+            let cinema_scale = state
+                .preferences
+                .evolution_home
+                .compact_cinema_scale
+                .label();
+            let mut rows = vec![
                 (0, "appNames", "appNamesAbout", "type", None, true),
                 (1, "clock", "clockAbout", "clock", None, true),
                 (
@@ -6918,10 +7245,45 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     true,
                 ),
             ];
+            if state.evolution.is_some() {
+                rows.push((
+                    crate::state::NAVIGATION_ROW,
+                    "evolutionNavigation",
+                    "evolutionNavigationHint",
+                    "grid",
+                    Some(
+                        state
+                            .preferences
+                            .evolution_home
+                            .global_position
+                            .label(language),
+                    ),
+                    true,
+                ));
+                rows.push((
+                    crate::state::DOCK_ROW,
+                    "evolutionDock",
+                    "evolutionDockScale",
+                    "grid",
+                    Some(dock_scale.as_str()),
+                    true,
+                ));
+                rows.push((
+                    crate::state::CINEMA_ROW,
+                    "evolutionCinema",
+                    "evolutionCinemaScale",
+                    "grid",
+                    Some(cinema_scale.as_str()),
+                    true,
+                ));
+            }
             let rects = list_rects(
                 state,
                 LIST_TOP,
-                &rows.map(|row| (Target::Setting(row.0), true)),
+                &rows
+                    .iter()
+                    .map(|row| (Target::Setting(row.0), true))
+                    .collect::<Vec<_>>(),
             );
             for ((index, key, about, icon, value, chevron), rect) in rows.into_iter().zip(rects) {
                 row(
@@ -6980,7 +7342,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
         }
         SYSTEM_SECTION => {
             let takeover_enabled = luma_tv_helper::home::TAKEOVER_ENABLED;
-            let rows = [
+            let mut rows = vec![
                 (
                     3,
                     language.t(if state.loading {
@@ -7036,6 +7398,31 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     false,
                 ),
             ];
+            if state.evolution.is_some() {
+                let before_quit = rows.len() - 1;
+                rows.insert(
+                    before_quit,
+                    (
+                        crate::state::TV_SETTINGS_ROW,
+                        language.t("tvSettings"),
+                        "",
+                        "tv",
+                        None,
+                        false,
+                    ),
+                );
+                rows.insert(
+                    before_quit + 1,
+                    (
+                        crate::state::ABOUT_ROW,
+                        language.t("evolutionAbout"),
+                        "",
+                        "generic",
+                        None,
+                        true,
+                    ),
+                );
+            }
             let update = if state.available_update.is_some() {
                 Target::InstallUpdate
             } else {

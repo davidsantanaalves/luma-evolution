@@ -36,6 +36,26 @@ by ecklf. It includes a Today card, Lampa, CS2 and crypto widgets, and a tvOS-st
 Luma Evolution installs beside Luma and Luma+ under its own app ID, `com.davidsantana.lumaevolution`.
 Preferences are independent. Launcher updates and publication are disabled during the foundation.
 
+The Evolution Home can be reviewed with the native desktop option `pnpm dev --home-preview`.
+The preview includes configurable All Apps and Settings actions, a separate inputs row,
+isolated preferences and labeled fictional content. See [the Stage 02 report](docs/home-stage02.md).
+In Settings → Interface → Dock, preview and save the Dock scale for expanded Cinema.
+The setting defaults to 40% and accepts 40% to 100% in steps of 5 percentage points.
+In Settings → Interface → Cinema, preview and save the compact Home's 16:9 card size.
+It defaults to 100% and accepts 40% to 100% in steps of 10 percentage points. With the widget area
+expanded, Cinema stays compact and uses 50% of the reference size. See the
+[R13 desktop captures](docs/home-stage02-r13-aceite.md).
+The [R1–R4 review](docs/home-stage02-review.md) adds horizontal 16:10 favorites, Inputs revealed
+after vertical navigation, weather over the wallpaper and a compact header during cinema expansion.
+The [R5–R9 review](docs/home-stage02-r5-r9.md) covers Dock/header alignment, expanded upper
+widgets with calendar and labeled forecast fixtures, contextual buttons and cinematic rotation.
+The [R10 review](docs/home-stage02-r10.md) shows the five Home areas, with bare icons at the top
+and calendar and weather details visible together when the widget area has focus.
+The [post-R12 review](docs/home-stage02-post-r12.md) compares two compact cinema sizes and
+limits widget focus to whole calendar and weather blocks when simulated apps are available.
+The [R11/R12 report](docs/home-stage02-r11-r12.md) preserves the earlier review and records
+the contextual scroll indicators still used by the desktop Home preview.
+
 ## Compatibility
 
 > [!NOTE]

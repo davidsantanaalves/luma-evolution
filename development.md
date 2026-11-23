@@ -1,5 +1,16 @@
 # Luma Evolution development
 
+## Canonical project source
+
+The project's linked Google Drive is canonical for Luma Evolution context and UX. Before
+implementing or changing a decision, consult the current originals under the verified source
+listed in [agents.md](agents.md#canonical-project-source). This repository holds the implementation
+and local validation reports.
+
+On the Windows workstation, edit the Windows checkout and synchronize it to the WSL/ext4 mirror
+before building or testing. Verify the branch and commit on each side and check synchronized file
+contents and modes. Keep review captures in a new directory under `.build/`.
+
 ## Layout
 
 ```text
@@ -22,6 +33,66 @@ is the Rust executable `luma`, with app ID `com.davidsantana.lumaevolution`. The
 `assets/wallpaper-upload/` and `assets/tile-editor/` are plain HTML/CSS/JavaScript, embedded in the
 native executable and served temporarily to the owner's phone or computer; they do not render the
 TV interface.
+
+The Evolution Home desktop preview runs with `pnpm dev --home-preview` using the native renderer,
+isolated preferences and labeled fictional content. Interface → Navigation moves All Apps and
+Luma Evolution Settings between the top and Dock. Hold OK on a Dock action to move it.
+See [`docs/home-stage02.md`](docs/home-stage02.md) for the navigation and validation details.
+The R1–R4 review uses horizontal 16:10 favorites only, weather without a background card,
+a compact expanded-cinema header and Inputs revealed by Down after the last favorite row.
+Legacy `square_icons` is ignored and omitted from subsequent saves. The isolated preview's
+`evolution_home.motion_profile` accepts `balanced` (default), `reduced` or `none`; the latter
+two snap geometry, as does the existing `reduced_motion` setting. Full profile controls remain
+outside this review. See [`docs/home-stage02-review.md`](docs/home-stage02-review.md).
+The [R5–R9 review](docs/home-stage02-r5-r9.md) adds measured Dock alignment, coordinated upper
+widgets, a local monthly calendar, forecast details and contextual global-button focus.
+`evolution_home.rotation_enabled` and `rotation_seconds` configure the monotonic cinematic
+rotation (10 seconds initially, 1–300 seconds); focus/hover pauses it and eligibility restarts
+a full cycle. The progress line uses that same cycle. Weather fixtures are desktop-only and
+explicitly labeled. The existing weather adapter supplies current readings only.
+The [R10 correction](docs/home-stage02-r10.md) separates top actions from the widgets.
+Focus on the widget area reveals both the calendar and available forecasts in the Home itself.
+The top actions render as bare icons with an enlarged, glowing vector and a label on focus.
+The [R11/R12 review](docs/home-stage02-r11-r12.md) records the historical clock
+interaction and the Home chevrons, which still reflect the Dock viewport and eligible Inputs.
+The [post-R12 review](docs/home-stage02-post-r12.md) makes the clock and widget details
+informational. Only complete calendar and weather blocks can receive focus, according to
+simulated app availability. In the desktop Home preview, the wheel traverses visible areas
+without selecting a control.
+The [Area 2 selection review](docs/home-stage02-area2-selection.md) gives the expanded calendar
+and clock summary a single selection frame matching Weather and adds a localized OK hint.
+Interface → Dock controls the Dock size while Cinema is expanded. Left and Right change the
+draft by 5 percentage points from 40% to 100%. The Settings preview shows the draft with Cinema
+expanded. Apply saves it to the preview preferences. Cancel or Back discards it. Restore defaults
+asks for confirmation and stages 40% for Apply. The neutral Dock uses its base size and Area 2
+keeps its existing contraction. Row capacity follows the base size throughout. The existing
+Cinema viewport adapts its content when larger Dock cards leave less vertical space.
+Interface → Cinema controls the 16:9 cards on compact Home. The default is 100% of the expanded
+card reference. Left and Right step from 40% to 100% by 10 percentage points. The draft appears
+in the live compact preview. Apply saves it, Cancel discards it, and Restore defaults stages
+100% after confirmation. Back with changes offers Apply, Discard and Keep editing. While the
+widget area is expanded, the layout requests 50% of the same reference and keeps Cinema's
+backdrop compact. Use `--home-preview-gles` to exercise the OpenGL ES renderer on desktop.
+See the [R13 evidence report](docs/home-stage02-r13-aceite.md).
+
+No preview desktop, o P01 mede as fileiras do Dock pelo espaço útil abaixo da Área 1 fixa,
+incluindo a expansão, a sombra e a legenda do foco. As fileiras mantêm a ordem, as colunas
+definidas pelo tamanho-base e a centralização independente. Áreas 2–5 compartilham o fluxo
+vertical, e as entradas ficam depois da última fileira. Se o foco já estiver visível, o Dock
+conserva o deslocamento. Na volta de outra área, recupera a posição da sessão pelo ID e pela
+geometria atual. O Dock vazio orienta a usar o atalho existente para Todos os Apps.
+Em Linux ou no espelho WSL/ext4, `xvfb-run -a pnpm test:home-preview --p01` verifica o preview
+OpenGL ES em 720p e 1080p com inventário fictício e guarda as capturas em `.build/home-stage02-p01/`.
+Ver decisões B29/B30/B32/B35/B36 em [UX_SPEC_HOME.md](https://drive.google.com/file/d/1y2W1ncepcXDraTQCp4sZvHtrcNQRYNaK/view).
+
+No P02, **Interface → Dock → Navegação horizontal** oferece A (parar na fileira),
+B (entre fileiras, padrão) e C (circular na própria fileira). Aplicar grava o rascunho
+em `evolution_home.dock_horizontal` (`stop`, `sequential`, `wrap_row`) junto com a escala.
+Cancelar e Voltar descartam o rascunho pelo fluxo existente. Os direcionais verticais usam o
+centro real dos cards da fileira adjacente, com empate exato à esquerda. A perda de foco procura
+o sucessor elegível e depois o antecessor na ordem anterior. Um processo novo começa no primeiro
+favorito elegível da ordem salva. No ext4, `xvfb-run -a pnpm test:home-preview --p02` valida o
+P02 e usa permissões Linux para simular falha de gravação. Ver o [roteiro P02](https://drive.google.com/file/d/1iCzI3gkzD0pnELxs9fJyKLLN5dptEqlZ/view).
 
 ## Toolchain and commands
 

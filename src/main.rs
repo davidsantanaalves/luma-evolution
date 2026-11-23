@@ -36,6 +36,7 @@ mod glass;
 mod glyph_atlas;
 mod gpu_timer;
 mod ground;
+mod home_evolution;
 mod homebrew_updates;
 mod i18n;
 #[path = "input-refresh.rs"]
@@ -97,6 +98,8 @@ use time::OffsetDateTime;
 
 #[derive(Default)]
 struct Options {
+    home_preview: bool,
+    home_preview_gles: bool,
     webos_home: bool,
     /// SAM preload launches must stay in the background until an ordinary Home launch.
     preload: Option<String>,
@@ -163,10 +166,16 @@ impl Options {
         while let Some(arg) = args.next() {
             if arg == "--help" {
                 println!(
-                    "Luma native\n\n  --assets PATH       Generated artwork directory\n  --preferences PATH  Isolated preferences file\n  --fullscreen        Fullscreen desktop preview\n  --resolution SIZE   Request 1080p, 4k, or WIDTHxHEIGHT; verify actual drawable\n  --frames N          Exit after N event-loop frames\n  --profile-frames N  Force N presentations (20+) and report pacing after warmup\n  --script ACTIONS    Comma-separated home/apps/settings/up/down/left/right/enter/back/menu/hold/today/focus-today/side-menu/type:TEXT/click:X:Y/wait\n  --time RFC3339      Fix the preview's clock and date\n  --screenshot PATH   Save an offscreen PNG\n  --capture-scale N   Capture at 1x/1080p (default) or 2x/4k\n  --diagnostics PATH  Save actual drawable, GPU, font-cache and timing information\n  --dump-state PATH   Save final UI state as JSON\n\nCompile with --features webos for the TV backend. Desktop builds never call TV services."
+                    "Luma native\n\n  --assets PATH       Generated artwork directory\n  --preferences PATH  Isolated preferences file\n  --fullscreen        Fullscreen desktop preview\n  --resolution SIZE   Request 1080p, 4k, or WIDTHxHEIGHT; verify actual drawable\n  --frames N          Exit after N event-loop frames\n  --profile-frames N  Force N presentations (20+) and report pacing after warmup\n  --script ACTIONS    Comma-separated home/apps/settings/up/down/left/right/enter/back/menu/hold/today/focus-today/side-menu/type:TEXT/click:X:Y/wait\n  --time RFC3339      Fix the preview's clock and date\n  --screenshot PATH   Save an offscreen PNG\n  --capture-scale N   Capture at 1x/1080p (default) or 2x/4k\n  --capture-size SIZE Capture at an explicit WIDTHxHEIGHT\n  --diagnostics PATH  Save actual drawable, GPU, font-cache and timing information\n  --dump-state PATH   Save final UI state as JSON\n\nCompile with --features webos for the TV backend. Desktop builds never call TV services."
                 );
                 println!(
                     "\n  --test-extra-apps N  Explicit scroll preview with up to 300 non-launchable extra cards; separate preferences"
+                );
+                println!(
+                    "  --home-preview      Stage 01 native Home; fictional content, desktop only, separate preferences"
+                );
+                println!(
+                    "  --home-preview-gles  Run the desktop Home preview with OpenGL ES shaders"
                 );
                 println!(
                     "  --test-update-version VERSION  Preview an available update without HTTP; also LUMA_TEST_UPDATE_VERSION"
@@ -180,6 +189,16 @@ impl Options {
                 result.fullscreen = true;
                 continue;
             }
+            if matches!(arg.as_str(), "--home-preview" | "--home-preview-gles") {
+                if cfg!(feature = "webos") {
+                    return Err(format!(
+                        "{arg} is desktop-only; fictional content cannot run on TV"
+                    ));
+                }
+                result.home_preview = true;
+                result.home_preview_gles |= arg == "--home-preview-gles";
+                continue;
+            }
             let value = args
                 .next()
                 .ok_or_else(|| format!("Missing value for {arg}"))?;
@@ -189,6 +208,7 @@ impl Options {
                 "--screenshot" => result.screenshot = Some(value.into()),
                 "--dump-state" => result.dump = Some(value.into()),
                 "--resolution" => result.resolution = Some(value.parse()?),
+                "--capture-size" => result.capture_size = Some(value.parse()?),
                 "--capture-scale" => {
                     result.capture_size = Some(match value.as_str() {
                         "1" => Size::HD,
@@ -308,7 +328,7 @@ impl BackButton {
         if !self.down(key, now) {
             return vec![];
         }
-        if state.overlay.is_some() || state.moving.is_some() {
+        if state.overlay.is_some() || state.moving.is_some() || state.evolution_moving() {
             // Dismiss once and consume the whole physical press, including any
             // subsequent native Exit notification and the final Back release.
             self.consume();
@@ -359,6 +379,7 @@ fn launch(state: &mut State, platform: &Platform, id: String, request: Request) 
         .map_or(0, |time| time.as_secs());
     state.preferences.note_launch(&id, now);
     if state.preferences.favorites_recent {
+        state.evolution_snapshot_dock_order();
         state.dirty = true;
     }
     if platform.webos {
@@ -394,6 +415,27 @@ fn effects(
 ) -> bool {
     for effect in effects {
         match effect {
+            Effect::SaveDockSettings { scale, horizontal } => {
+                let mut updated = state.preferences.clone();
+                updated.evolution_home.cinema_dock_scale = scale;
+                updated.evolution_home.dock_horizontal = horizontal;
+                if let Err(error) = storage::save(preferences, &updated) {
+                    eprintln!("{error}");
+                    state.notify(state.preferences.language.t("savedError"));
+                } else {
+                    state.dock_settings_saved(scale, horizontal);
+                }
+            }
+            Effect::SaveCinemaScale(scale) => {
+                let mut updated = state.preferences.clone();
+                updated.evolution_home.compact_cinema_scale = scale;
+                if let Err(error) = storage::save(preferences, &updated) {
+                    eprintln!("{error}");
+                    state.notify(state.preferences.language.t("savedError"));
+                } else {
+                    state.cinema_scale_saved(scale);
+                }
+            }
             Effect::Save => {
                 if let Err(error) = storage::save(preferences, &state.preferences) {
                     eprintln!("{error}");
@@ -463,6 +505,117 @@ fn script(
     controls: &[state::Control],
 ) -> Result<Vec<Effect>, String> {
     Ok(match action {
+        action if action.starts_with("preview-") => {
+            if cfg!(feature = "webos") || state.evolution.is_none() {
+                return Err("Home fixture actions require the desktop Home preview".into());
+            }
+            match action {
+                action if action.starts_with("preview-hover:") => {
+                    let (x, y) = action["preview-hover:".len()..]
+                        .split_once(':')
+                        .and_then(|(x, y)| Some((x.parse::<f32>().ok()?, y.parse::<f32>().ok()?)))
+                        .ok_or("Invalid preview hover coordinates")?;
+                    let target = state.hit_test(controls, x, y);
+                    if let Some(target) = target {
+                        state.pointer_focus(target);
+                    } else {
+                        state.evolution_hover_gap(Some((x, y)), Instant::now());
+                    }
+                }
+                "preview-cinema" => {
+                    state.evolution.as_mut().unwrap().expanded = true;
+                }
+                "preview-restart-cycle" => {
+                    let home = state.evolution.as_mut().unwrap();
+                    home.rotation.reset();
+                    home.rotation_trace_start = home.rotation.advances;
+                    home.rotation_trace_selected = home.selected;
+                }
+                "preview-pause" => {
+                    state.direction(Direction::Up, controls);
+                }
+                "preview-pointer-cinema" => {
+                    let i = home_evolution::content(state.evolution.as_ref().unwrap().selected);
+                    state.pointer_focus(Target::EvolutionContent(format!(
+                        "{}:{i}",
+                        home_evolution::CONTENTS[i].0
+                    )));
+                }
+                "preview-pointer-leave" => {
+                    let target = state.evolution_dock();
+                    state.pointer_focus(target);
+                }
+                "preview-weather-ready" => {
+                    state.evolution.as_mut().unwrap().weather_fixture =
+                        home_evolution::WeatherFixture::Ready
+                }
+                "preview-weather-loading" => {
+                    state.evolution.as_mut().unwrap().weather_fixture =
+                        home_evolution::WeatherFixture::Loading
+                }
+                "preview-weather-error" => {
+                    state.evolution.as_mut().unwrap().weather_fixture =
+                        home_evolution::WeatherFixture::Error
+                }
+                action if action.starts_with("preview-cinema-size:") => {
+                    let scale = action["preview-cinema-size:".len()..]
+                        .parse::<u8>()
+                        .ok()
+                        .and_then(home_evolution::CinemaScale::from_percent)
+                        .ok_or("Cinema preview size must be 40–100 in steps of 10")?;
+                    state.evolution.as_mut().unwrap().cinema_scale_override = Some(scale);
+                }
+                action if action.starts_with("preview-widget-apps:") => {
+                    let (calendar, weather) = match &action["preview-widget-apps:".len()..] {
+                        "both" => (true, true),
+                        "weather" => (false, true),
+                        "calendar" => (true, false),
+                        "none" => (false, false),
+                        _ => {
+                            return Err(
+                                "Widget app fixture must be both, weather, calendar or none".into(),
+                            );
+                        }
+                    };
+                    state.evolution.as_mut().unwrap().widget_apps =
+                        home_evolution::WidgetAppFixture { calendar, weather };
+                    state.reconcile_focus();
+                }
+                "preview-catalog-one" => state.evolution.as_mut().unwrap().catalog_len = Some(1),
+                "preview-catalog-empty" => state.evolution.as_mut().unwrap().catalog_len = Some(0),
+                action if action.starts_with("preview-remove-apps:") => {
+                    let ids: Vec<_> = action["preview-remove-apps:".len()..].split('|').collect();
+                    let mut inventory = state.inventory.clone();
+                    if ids
+                        .iter()
+                        .any(|id| !inventory.apps.iter().any(|app| app.id == *id))
+                    {
+                        return Err("Preview removal requires existing app IDs".into());
+                    }
+                    inventory.apps.retain(|app| !ids.contains(&app.id.as_str()));
+                    state.set_inventory(inventory, None);
+                }
+                _ => return Err(format!("Unknown preview action: {action}")),
+            }
+            state.dirty = true;
+            vec![]
+        }
+        action if action.starts_with("await-pause:") => {
+            if cfg!(feature = "webos") || state.evolution.is_none() {
+                return Err("Home timing fixtures require the desktop Home preview".into());
+            }
+            state.direction(Direction::Up, controls)
+        }
+        action
+            if action.starts_with("await-progress:")
+                || action == "await-cycle"
+                || action == "await-settled" =>
+        {
+            if cfg!(feature = "webos") || state.evolution.is_none() {
+                return Err("Home timing fixtures require the desktop Home preview".into());
+            }
+            vec![]
+        }
         "home" => {
             state.open(0);
             vec![]
@@ -607,6 +760,37 @@ fn describe(command: &renderer::Draw) -> String {
     }
 }
 
+fn home_header_draws(scene: &view::Scene, state: &State) -> Vec<serde_json::Value> {
+    use renderer::Draw;
+    let header = home_evolution::header_geometry(state);
+    scene
+        .draw
+        .iter()
+        .filter_map(|draw| {
+            let (kind, rect, value, color) = match draw {
+                Draw::Text(text, rect, _, color, _) => ("text", rect, text.as_str(), Some(color)),
+                Draw::TintedImage(path, rect, _, _, color) => (
+                    "image",
+                    rect,
+                    path.rsplit('/').next().unwrap_or(path),
+                    Some(color),
+                ),
+                Draw::Shape(rect, ..) => ("shape", rect, "", None),
+                Draw::Glass(_, rect, ..) => ("glass", rect, "", None),
+                Draw::Shadow(rect, ..) => ("shadow", rect, "", None),
+                Draw::RoundedGradient(rect, ..) => ("gradient", rect, "", None),
+                _ => return None,
+            };
+            (rect.y >= 0. && rect.y < header.bottom && rect.w < 1760.).then(|| {
+                serde_json::json!({
+                    "kind": kind, "rect": [rect.x, rect.y, rect.w, rect.h],
+                    "value": value, "color": color,
+                })
+            })
+        })
+        .collect()
+}
+
 /// A wallpaper fade's end alone, on the old wallpaper or the new one, as `compose` lays it out.
 fn compose_end(
     state: &mut State,
@@ -645,6 +829,8 @@ fn input_refresh_active(state: &State, webos: bool, focused: bool, visible: bool
 
 /// True when a renamed place needs the preferences saved.
 fn weather_tick(state: &mut State, service: &weather_service::Service, visible: bool) -> bool {
+    // Stage 01 renders a reservation, not a forecast. Hidden widgets never start HTTP.
+    let visible = visible && state.evolution.is_none();
     let mut save = false;
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let (command, changed) = state.weather.sync(
@@ -680,6 +866,8 @@ fn weather_tick(state: &mut State, service: &weather_service::Service, visible: 
 }
 
 fn crypto_tick(state: &mut State, service: &crypto_service::Service, visible: bool) {
+    let visible = visible
+        && (state.evolution.is_none() || matches!(state.overlay, Some(Overlay::Today { .. })));
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let (command, changed) = state.crypto.sync(
         state.preferences.show_crypto,
@@ -714,6 +902,8 @@ fn shows_tick(
     visible: bool,
     offset: time::UtcOffset,
 ) {
+    let visible = visible
+        && (state.evolution.is_none() || matches!(state.overlay, Some(Overlay::Today { .. })));
     let now = OffsetDateTime::now_utc().unix_timestamp();
     // Every feed but the history, which comes with the account, is read from CUB's catalogue.
     let feed = state.preferences.lampa_feed;
@@ -766,6 +956,12 @@ fn cub_tick(
     visible: bool,
     offset: time::UtcOffset,
 ) {
+    let visible = visible
+        && (state.evolution.is_none()
+            || matches!(
+                state.overlay,
+                Some(Overlay::Today { .. } | Overlay::CubSignIn)
+            ));
     let now = OffsetDateTime::now_utc().unix_timestamp();
     if std::mem::take(&mut state.cub_forget) {
         cub::forget(path);
@@ -856,6 +1052,8 @@ fn cub_tick(
 /// The cards the TV's apps publish, for the Lampa row: read while Home shows the row, and
 /// the pictures of the cards in view.
 fn app_cards_tick(state: &mut State, service: &app_cards_service::Service, visible: bool) {
+    let visible = visible
+        && (state.evolution.is_none() || matches!(state.overlay, Some(Overlay::Today { .. })));
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let preferences = &state.preferences;
     let in_center = preferences.center() == Some(model::Center::Apps);
@@ -903,6 +1101,8 @@ fn app_cards_tick(state: &mut State, service: &app_cards_service::Service, visib
 
 /// The country whose TV schedule joins the streaming one, from the UI language.
 fn cs2_tick(state: &mut State, service: &cs2_service::Service, visible: bool) {
+    let visible = visible
+        && (state.evolution.is_none() || matches!(state.overlay, Some(Overlay::Today { .. })));
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let (command, changed) = state.cs2.sync(
         state.preferences.show_cs2,
@@ -1116,14 +1316,21 @@ fn run() -> Result<(), String> {
         .clone()
         .map(Ok)
         .unwrap_or_else(|| storage::default_path(webos))?;
-    let preferences_path = if options.test_extra_apps > 0 && options.preferences.is_none() {
+    let preferences_path = if options.home_preview {
+        // Isolate companion credentials, uploads and caches as well as the preferences JSON.
+        default_preferences
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("home-evolution-preview/preferences.json")
+    } else if options.test_extra_apps > 0 && options.preferences.is_none() {
         default_preferences.with_file_name("scroll-preview-preferences.json")
     } else {
         default_preferences.clone()
     };
     // Start the preview with the user's current choices, but keep test favorites
     // and hidden placeholders out of their normal preferences file.
-    let initial_preferences = if options.test_extra_apps > 0
+    let initial_preferences = if !options.home_preview
+        && options.test_extra_apps > 0
         && options.preferences.is_none()
         && !preferences_path.exists()
     {
@@ -1158,9 +1365,17 @@ fn run() -> Result<(), String> {
             renderer::set_profile_skip(skip);
         }
     }
-    let interactive_run = options.script.is_empty() && options.test_update_version.is_none();
+    let interactive_run =
+        options.script.is_empty() && options.test_update_version.is_none() && !options.home_preview;
     let public_update_checks = update::SELF_UPDATE_ENABLED && interactive_run;
     let mut state = State::new(initial_preferences);
+    if options.home_preview {
+        state.evolution = Some(home_evolution::Home::default());
+        eprintln!(
+            "Luma Evolution: native Home preview; fictional content; isolated preferences: {}",
+            preferences_path.display()
+        );
+    }
     // Each wallpaper fade waits until its new wallpaper is decoded and its ends are drawn.
     state.hold_fades = true;
     // Lampa's CUB sign-in, kept beside the preferences and never in them.
@@ -1234,7 +1449,7 @@ fn run() -> Result<(), String> {
     let homebrew = homebrew_updates::Worker::new(webos && interactive_run);
     let platform = Platform::new(
         webos,
-        options.preferences.is_none() && options.test_extra_apps == 0,
+        options.preferences.is_none() && options.test_extra_apps == 0 && !options.home_preview,
     );
     let webhook_service = webhook::Service::new();
     let update_service = update::Service::new(public_update_checks);
@@ -1276,7 +1491,8 @@ fn run() -> Result<(), String> {
     eprintln!("Luma SDL video driver: {}", video.current_video_driver());
     startup_stage("SDL video");
     let attributes = video.gl_attr();
-    if webos {
+    let gles = webos || options.home_preview_gles;
+    if gles {
         attributes.set_context_profile(GLProfile::GLES);
         attributes.set_context_version(2, 0);
     } else {
@@ -1339,7 +1555,7 @@ fn run() -> Result<(), String> {
     }
     let (window, _context) = opened.ok_or_else(|| failures.join("; "))?;
     gl::load_with(|name| video.gl_get_proc_address(name) as *const _);
-    if !webos {
+    if !gles {
         unsafe { gl::Enable(gl::MULTISAMPLE) };
     }
     let mut samples = 0;
@@ -1350,7 +1566,7 @@ fn run() -> Result<(), String> {
         eprintln!("VSync: {error}");
     }
     let mut renderer =
-        renderer::Renderer::new(&assets.root.join("font.ttf"), webos, text_config.embolden)?;
+        renderer::Renderer::new(&assets.root.join("font.ttf"), gles, text_config.embolden)?;
     renderer.plain = !layers;
     startup_stage("renderer");
     // Redraw only what changed since the back buffer's frame (LUMA_PARTIAL=0 draws in full).
@@ -1360,7 +1576,7 @@ fn run() -> Result<(), String> {
     .flatten();
     let mut gpu_timer = None;
     if let Some(log) = &mut perf_log {
-        let timer = gpu_timer::GpuTimer::load(webos, |name| video.gl_get_proc_address(name).cast());
+        let timer = gpu_timer::GpuTimer::load(gles, |name| video.gl_get_proc_address(name).cast());
         log.note(&format!(
             "start Luma Evolution {} {} msaa {samples} partial {} ground {} layers {} gpu timer {}",
             env!("CARGO_PKG_VERSION"),
@@ -1558,6 +1774,10 @@ fn run() -> Result<(), String> {
             last_minute = Some(clock_slot);
             state.dirty = true;
         }
+        if let Some(home) = state.evolution.as_mut() {
+            home.suspended = !visible;
+            home.defer_rotation = true;
+        }
         state.tick();
         wallpaper_service.set_active(wallpaper_upload_active(&state, webos, focused, visible));
         while let Ok(event) = wallpaper_service.receiver.try_recv() {
@@ -1722,7 +1942,12 @@ fn run() -> Result<(), String> {
                         && state.focus == Target::Nav(0)
                         && state.page == state::Page::Home
                     {
-                        state.focus = state.first_content();
+                        let target = state.first_content();
+                        if state.evolution_active() {
+                            state.evolution_focus_dock(target);
+                        } else {
+                            state.focus = target;
+                        }
                     }
                     initial_focus = false;
                 }
@@ -1737,7 +1962,11 @@ fn run() -> Result<(), String> {
                         );
                         inventory_retry = Some(Instant::now() + delay);
                     } else if initial_focus {
-                        state.focus = state.first_content();
+                        if state.evolution.is_none()
+                            || (state.evolution_active() && state.focus == Target::Nav(0))
+                        {
+                            state.focus = state.first_content();
+                        }
                         initial_focus = false;
                     }
                 }
@@ -1854,7 +2083,7 @@ fn run() -> Result<(), String> {
         }
         if let Some(direction) = edge_pointer
             .filter(|_| state.pointer && state.overlay.is_none() && press.is_none())
-            .filter(|_| state.page == state::Page::Home)
+            .filter(|_| state.page == state::Page::Home && !state.evolution_active())
             .and_then(|(x, y)| {
                 let (at, _) = pointer_position(&window, x, y)?;
                 let side = if at < EDGE_ZONE {
@@ -1907,11 +2136,10 @@ fn run() -> Result<(), String> {
                     || options.profile_frames.is_some()
                     || !options.script.is_empty());
             let external_input = match &event {
-                Event::MouseButtonDown { which, .. } | Event::MouseButtonUp { which, .. } => {
-                    *which != SCRIPT_POINTER
-                }
+                Event::MouseButtonDown { which, .. }
+                | Event::MouseButtonUp { which, .. }
+                | Event::MouseWheel { which, .. } => *which != SCRIPT_POINTER,
                 Event::MouseMotion { .. }
-                | Event::MouseWheel { .. }
                 | Event::KeyDown { .. }
                 | Event::KeyUp { .. }
                 | Event::TextEditing { .. }
@@ -2152,12 +2380,15 @@ fn run() -> Result<(), String> {
                 }
                 Event::MouseMotion { x, y, .. }
                     if state.moving.is_none()
+                        && !state.evolution_moving()
                         && !matches!(state.overlay, Some(Overlay::SystemKeyboard)) =>
                 {
                     edge_pointer = Some((x, y));
                     let hovered = hit(&scene.controls, &window, x, y, &state);
                     if let Some(target) = hovered.clone() {
                         state.pointer_focus(target);
+                    } else {
+                        state.evolution_hover_gap(pointer_position(&window, x, y), Instant::now());
                     }
                     if press
                         .as_ref()
@@ -2172,6 +2403,7 @@ fn run() -> Result<(), String> {
                     back_button.cancel();
                     if let Some(target) = hit(&scene.controls, &window, x, y, &state)
                         && state.moving.is_none()
+                        && !state.evolution_moving()
                     {
                         if matches!(state.overlay, Some(Overlay::SystemKeyboard)) {
                             pending = state.finish_text_input();
@@ -2202,6 +2434,7 @@ fn run() -> Result<(), String> {
                     Some(held)
                         if held.pointer
                             && !held.held
+                            && (!state.evolution_active() || held.target == state.focus)
                             && hit(&scene.controls, &window, x, y, &state).as_ref()
                                 == Some(&held.target) =>
                     {
@@ -2233,8 +2466,16 @@ fn run() -> Result<(), String> {
                     y,
                     mouse_x,
                     mouse_y,
+                    direction,
                     ..
                 } if state.overlay.is_none() => {
+                    let y = if state.evolution_active()
+                        && direction == sdl2::mouse::MouseWheelDirection::Flipped
+                    {
+                        y.saturating_neg()
+                    } else {
+                        y
+                    };
                     if state.wheel_scroll(
                         &scene.controls,
                         pointer_position(&window, mouse_x, mouse_y),
@@ -2294,6 +2535,7 @@ fn run() -> Result<(), String> {
         }
         if let Some(held) = &mut press
             && !held.held
+            && (!state.evolution_active() || held.target == state.focus)
             && held.start.elapsed() >= Duration::from_millis(600)
         {
             held.held = true;
@@ -2301,9 +2543,29 @@ fn run() -> Result<(), String> {
             state.hold();
         }
         if !state.loading
-            && frame.is_multiple_of(3)
+            && (frame.is_multiple_of(3)
+                || options
+                    .script
+                    .front()
+                    .is_some_and(|a| a.starts_with("await-pause:")))
             && !options.script.front().is_some_and(|action| {
-                (action == "await-search" && state.weather.searching)
+                (action == "await-settled" && state.animating())
+                    || (action == "await-cycle"
+                        && state
+                            .evolution
+                            .as_ref()
+                            .is_some_and(|h| h.rotation.advances == h.rotation_trace_start))
+                    || (action
+                        .strip_prefix("await-progress:")
+                        .or_else(|| action.strip_prefix("await-pause:"))
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .is_some_and(|p| {
+                            state
+                                .evolution
+                                .as_ref()
+                                .is_some_and(|h| h.rotation.progress() < p)
+                        }))
+                    || (action == "await-search" && state.weather.searching)
                     || (action == "await-weather" && state.weather.fetching())
                     || (action == "await-crypto" && state.crypto.fetching())
                     || (action == "await-recents" && state.recents.pending.is_some())
@@ -2318,8 +2580,45 @@ fn run() -> Result<(), String> {
             })
             && let Some(action) = options.script.pop_front()
         {
-            if let Some(position) = action.strip_prefix("click:") {
+            if action == "preview-motion-capture" && state.evolution.is_some() {
+                options.frames = Some(frame + 1);
+            } else if action == "preview-finish" && state.evolution.is_some() {
+                options.frames = Some(frame + 12);
+            } else if action == "preview-click-dock"
+                && state.evolution.is_some()
+                && !cfg!(feature = "webos")
+            {
+                if let Some(control) = scene
+                    .controls
+                    .iter()
+                    .find(|c| matches!(c.target, Target::App(_)))
+                {
+                    let (x, y) = control.rect.center();
+                    scripted_click(&sdl, &window, &format!("{x}:{y}"))?;
+                }
+            } else if let Some(position) = action.strip_prefix("click:") {
                 scripted_click(&sdl, &window, position)?;
+            } else if let Some(direction) = action.strip_prefix("preview-wheel:") {
+                if cfg!(feature = "webos") || state.evolution.is_none() {
+                    return Err("Wheel fixtures require the desktop Home preview".into());
+                }
+                let y = match direction {
+                    "up" => 1,
+                    "down" => -1,
+                    _ => return Err("Wheel fixture direction must be up or down".into()),
+                };
+                sdl.event()?.push_event(Event::MouseWheel {
+                    timestamp: 0,
+                    window_id: window.id(),
+                    which: SCRIPT_POINTER,
+                    x: 0,
+                    y,
+                    direction: sdl2::mouse::MouseWheelDirection::Normal,
+                    precise_x: 0.,
+                    precise_y: y as f32,
+                    mouse_x: 0,
+                    mouse_y: 0,
+                })?;
             } else if action == "prewarm" {
                 prewarm_now = true;
             } else {
@@ -2335,6 +2634,12 @@ fn run() -> Result<(), String> {
                     &updates,
                 );
             }
+        }
+        if let Some(home) = state.evolution.as_mut() {
+            home.defer_rotation = false;
+            home.suspended = !visible;
+            // Pending directional/pointer input wins over an expired rotation interval.
+            state.evolution_tick(0.);
         }
         wallpaper_service
             .set_active(running && wallpaper_upload_active(&state, webos, focused, visible));
@@ -2731,6 +3036,20 @@ fn run() -> Result<(), String> {
     if let Some(path) = options.dump {
         let state = serde_json::json!({ "page": state.page, "focus": state.focus, "query": state.query,
             "filter": state.filter, "preferences": state.preferences, "apps": state.apps().iter().map(|a| &a.id).collect::<Vec<_>>(),
+            "home_preview": state.evolution.as_ref().map(|home| serde_json::json!({"selected": home_evolution::content(home.selected), "first": home.first, "expanded": home.expanded, "expansion": home.expansion.value,
+                "top_expansion": home.top_expansion.value,
+                "compact_cinema_percent": state.compact_cinema_percent(),
+                "simulated_widget_apps": home.widget_apps,
+                "simulated_widget_open": home.simulated_widget_open,
+                "header": home_evolution::header_geometry(&state).diagnostic(),
+                "header_draws": home_header_draws(&scene, &state),
+                "button_amounts": home.button_focus.iter().map(|t| t.value).collect::<Vec<_>>(),
+                "rotation_progress": home.rotation.progress(), "rotation_paused": home.rotation.paused, "rotation_advances": home.rotation.advances - home.rotation_trace_start,
+                "rotation_total_advances": home.rotation.advances, "rotation_trace_start": home.rotation_trace_start, "rotation_trace_selected": home.rotation_trace_selected,
+                "rotation_elapsed_seconds": home.rotation.elapsed.as_secs_f64(),
+                "geometry": state.evolution_geometry().diagnostic(),
+                "controls": scene.controls.iter().map(|control| serde_json::json!({"target": control.target, "x": control.rect.x, "y": control.rect.y, "w": control.rect.w, "h": control.rect.h})).collect::<Vec<_>>(),
+                "draw_commands": scene.draw.iter().map(describe).collect::<Vec<_>>() })),
             "update_status": state.update_status, "available_update": state.available_update, "update_changes": state.update_changes,
             "error": state.error, "scroll": state.scroll, "home_scroll": state.home_scroll, "subpage": state.subpage, "modal": state.overlay.is_some(), "weather": state.weather, "crypto": state.crypto, "cs2": state.cs2,
             "inventory": state.inventory.apps,
