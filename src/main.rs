@@ -436,6 +436,16 @@ fn effects(
                     state.cinema_scale_saved(scale);
                 }
             }
+            Effect::SaveWheelSteps(steps) => {
+                let mut updated = state.preferences.clone();
+                updated.evolution_home.wheel_steps = steps;
+                if let Err(error) = storage::save(preferences, &updated) {
+                    eprintln!("{error}");
+                    state.notify(state.preferences.language.t("savedError"));
+                } else {
+                    state.wheel_steps_saved(steps);
+                }
+            }
             Effect::Save => {
                 if let Err(error) = storage::save(preferences, &state.preferences) {
                     eprintln!("{error}");
@@ -1165,17 +1175,16 @@ fn cs2_tick(state: &mut State, service: &cs2_service::Service, visible: bool) {
     }
 }
 
-fn scripted_click(
-    sdl: &sdl2::Sdl,
+fn scripted_pointer_position(
     window: &sdl2::video::Window,
     position: &str,
-) -> Result<(), String> {
+) -> Result<(i32, i32), String> {
     let coordinates: Vec<f32> = position
         .split(':')
         .map(|value| value.parse::<f32>().map_err(|e| e.to_string()))
         .collect::<Result<_, _>>()?;
     let [x, y] = coordinates.as_slice() else {
-        return Err("click: expects logical x:y coordinates".into());
+        return Err("Expected logical x:y pointer coordinates".into());
     };
     if !x.is_finite() || !y.is_finite() {
         return Err("Pointer coordinates must be finite".into());
@@ -1184,6 +1193,15 @@ fn scripted_click(
     let scale = (w as f32 / 1920.).min(h as f32 / 1080.);
     let x = (x * scale + (w as f32 - 1920. * scale) / 2.).round() as i32;
     let y = (y * scale + (h as f32 - 1080. * scale) / 2.).round() as i32;
+    Ok((x, y))
+}
+
+fn scripted_click(
+    sdl: &sdl2::Sdl,
+    window: &sdl2::video::Window,
+    position: &str,
+) -> Result<(), String> {
+    let (x, y) = scripted_pointer_position(window, position)?;
     let events = sdl.event()?;
     for event in [
         Event::MouseButtonDown {
@@ -2138,9 +2156,9 @@ fn run() -> Result<(), String> {
             let external_input = match &event {
                 Event::MouseButtonDown { which, .. }
                 | Event::MouseButtonUp { which, .. }
-                | Event::MouseWheel { which, .. } => *which != SCRIPT_POINTER,
-                Event::MouseMotion { .. }
-                | Event::KeyDown { .. }
+                | Event::MouseWheel { which, .. }
+                | Event::MouseMotion { which, .. } => *which != SCRIPT_POINTER,
+                Event::KeyDown { .. }
                 | Event::KeyUp { .. }
                 | Event::TextEditing { .. }
                 | Event::TextInput { .. } => true,
@@ -2378,10 +2396,12 @@ fn run() -> Result<(), String> {
                         pending = state.activate();
                     }
                 }
-                Event::MouseMotion { x, y, .. }
-                    if state.moving.is_none()
-                        && !state.evolution_moving()
-                        && !matches!(state.overlay, Some(Overlay::SystemKeyboard)) =>
+                Event::MouseMotion {
+                    x, y, xrel, yrel, ..
+                } if state.moving.is_none()
+                    && !state.evolution_moving()
+                    && !matches!(state.overlay, Some(Overlay::SystemKeyboard))
+                    && state.evolution_pointer_motion(xrel, yrel) =>
                 {
                     edge_pointer = Some((x, y));
                     let hovered = hit(&scene.controls, &window, x, y, &state);
@@ -2486,6 +2506,9 @@ fn run() -> Result<(), String> {
                     }
                 }
                 _ => {}
+            }
+            if !state.evolution_active() || state.evolution_moving() {
+                state.evolution_discard_wheel();
             }
             running &= effects(
                 pending,
@@ -2598,23 +2621,53 @@ fn run() -> Result<(), String> {
                 }
             } else if let Some(position) = action.strip_prefix("click:") {
                 scripted_click(&sdl, &window, position)?;
+            } else if let Some(motion) = action.strip_prefix("preview-motion:") {
+                if cfg!(feature = "webos") || state.evolution.is_none() {
+                    return Err("Motion fixtures require the desktop Home preview".into());
+                }
+                let (kind, position) = motion.split_once(':').ok_or("Invalid motion fixture")?;
+                let xrel = match kind {
+                    "move" => 1,
+                    "residual" => 0,
+                    _ => return Err("Expected move or residual motion fixture".into()),
+                };
+                let (x, y) = scripted_pointer_position(&window, position)?;
+                sdl.event()?.push_event(Event::MouseMotion {
+                    timestamp: 0,
+                    window_id: window.id(),
+                    which: SCRIPT_POINTER,
+                    mousestate: sdl2::mouse::MouseState::from_sdl_state(0),
+                    x,
+                    y,
+                    xrel,
+                    yrel: 0,
+                })?;
             } else if let Some(direction) = action.strip_prefix("preview-wheel:") {
                 if cfg!(feature = "webos") || state.evolution.is_none() {
                     return Err("Wheel fixtures require the desktop Home preview".into());
                 }
-                let y = match direction {
-                    "up" => 1,
-                    "down" => -1,
-                    _ => return Err("Wheel fixture direction must be up or down".into()),
+                let (direction, count) = direction.split_once(':').unwrap_or((direction, "1"));
+                let count = count
+                    .parse::<i32>()
+                    .map_err(|_| "Invalid wheel fixture steps")?;
+                if count <= 0 {
+                    return Err("Wheel fixture steps must be positive".into());
+                }
+                let (x, y, direction) = match direction {
+                    "up" => (0, count, sdl2::mouse::MouseWheelDirection::Normal),
+                    "down" => (0, -count, sdl2::mouse::MouseWheelDirection::Normal),
+                    "flipped" => (0, -count, sdl2::mouse::MouseWheelDirection::Flipped),
+                    "horizontal" => (count, 0, sdl2::mouse::MouseWheelDirection::Normal),
+                    _ => return Err("Invalid wheel fixture direction".into()),
                 };
                 sdl.event()?.push_event(Event::MouseWheel {
                     timestamp: 0,
                     window_id: window.id(),
                     which: SCRIPT_POINTER,
-                    x: 0,
+                    x,
                     y,
-                    direction: sdl2::mouse::MouseWheelDirection::Normal,
-                    precise_x: 0.,
+                    direction,
+                    precise_x: x as f32,
                     precise_y: y as f32,
                     mouse_x: 0,
                     mouse_y: 0,
@@ -3034,10 +3087,10 @@ fn run() -> Result<(), String> {
         return Err("Frame budget ended before the input script completed".into());
     }
     if let Some(path) = options.dump {
-        let state = serde_json::json!({ "page": state.page, "focus": state.focus, "query": state.query,
+        let state = serde_json::json!({ "page": state.page, "focus": state.focus, "pointer": state.pointer, "query": state.query,
             "filter": state.filter, "preferences": state.preferences, "apps": state.apps().iter().map(|a| &a.id).collect::<Vec<_>>(),
             "home_preview": state.evolution.as_ref().map(|home| serde_json::json!({"selected": home_evolution::content(home.selected), "first": home.first, "expanded": home.expanded, "expansion": home.expansion.value,
-                "top_expansion": home.top_expansion.value,
+                "top_expansion": home.top_expansion.value, "moving": state.evolution_moving(),
                 "compact_cinema_percent": state.compact_cinema_percent(),
                 "simulated_widget_apps": home.widget_apps,
                 "simulated_widget_open": home.simulated_widget_open,

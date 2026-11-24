@@ -10,15 +10,19 @@ const area2Only = process.argv.includes('--area2-selection');
 const r13Only = process.argv.includes('--r13');
 const p01Only = process.argv.includes('--p01');
 const p02Only = process.argv.includes('--p02');
-const defaultOutput = p02Only
-  ? path.join(root, '.build/home-stage02-p02')
-  : p01Only
-    ? path.join(root, '.build/home-stage02-p01')
-    : path.join(
-        root,
-        '.build/home-stage02-r13-aceite',
-        r13Only ? '' : area2Only ? 'area2-selection' : 'regression',
-      );
+const p03Only = process.argv.includes('--p03');
+const gles = r13Only || p01Only || p02Only || p03Only;
+const defaultOutput = p03Only
+  ? path.join(root, '.build/home-stage02-p03')
+  : p02Only
+    ? path.join(root, '.build/home-stage02-p02')
+    : p01Only
+      ? path.join(root, '.build/home-stage02-p01')
+      : path.join(
+          root,
+          '.build/home-stage02-r13-aceite',
+          r13Only ? '' : area2Only ? 'area2-selection' : 'regression',
+        );
 const output = path.resolve(process.env.LUMA_HOME_SMOKE_OUTPUT ?? defaultOutput);
 await fs.mkdir(output, { recursive: true });
 const binary = path.resolve(root, process.env.CARGO_TARGET_DIR ?? 'target', 'debug/luma');
@@ -51,7 +55,7 @@ try {
     const result = spawnSync(
       binary,
       [
-        r13Only || p01Only || p02Only ? '--home-preview-gles' : '--home-preview',
+        gles ? '--home-preview-gles' : '--home-preview',
         '--resolution',
         '1920x1080',
         '--preferences',
@@ -80,7 +84,7 @@ try {
     assert.equal(result.status, 0, result.stderr);
     const state = JSON.parse(await fs.readFile(dump, 'utf8'));
     const render = JSON.parse(await fs.readFile(diagnostics, 'utf8'));
-    if (r13Only || p01Only || p02Only) assert.match(render.graphics.version, /^OpenGL ES /);
+    if (gles) assert.match(render.graphics.version, /^OpenGL ES /);
     assert.deepEqual(
       render.window,
       extra.includes('1280x720') ? { width: 1280, height: 720 } : { width: 1920, height: 1080 },
@@ -103,7 +107,9 @@ try {
       '3000',
       ...extra,
     ]);
-  if (p02Only) {
+  if (p03Only) {
+    await reviewP03(capture);
+  } else if (p02Only) {
     await reviewP02(scenario, capture);
   } else if (p01Only) {
     await reviewP01(capture);
@@ -116,6 +122,191 @@ try {
   console.log(`Native Home Evolution: ${scenarios} native rendering/navigation scenarios passed`);
 } finally {
   await fs.rm(scratch, { recursive: true, force: true });
+}
+
+async function reviewP03(capture) {
+  const base = 'home,preview-weather-ready,preview-widget-apps:both';
+  const ids = Array.from(
+    { length: 50 },
+    (_, n) => `com.luma.scroll-preview.${String(n).padStart(3, '0')}`,
+  );
+  const nav = 'settings,right' + ',down'.repeat(7) + ',enter,down,down,enter';
+  const up = (n = 1) => `preview-wheel:up:${n}`;
+  const down = (n = 1) => `preview-wheel:down:${n}`;
+  const area = (state, name) => {
+    assert.equal(state.page, 'Home');
+    assert.deepEqual(state.focus, { EvolutionArea: name });
+    assert.equal(state.home_preview.simulated_widget_open, null);
+  };
+  const centerOf = (control) => `${control.x + control.w / 2}:${control.y + control.h / 2}`;
+  for (const [resolution, size] of [
+    ['1080p', '1920x1080'],
+    ['720p', '1280x720'],
+  ]) {
+    const preview = { rotation_enabled: false, dock_size: 'compact' };
+    const config = { favorites: ids, evolution_home: preview };
+    const steps = (n) => ({ ...config, evolution_home: { ...preview, wheel_steps: n } });
+    const shot = (name, actions, prefs = config) =>
+      capture(`${resolution}-${name}`, [base, ...actions].join(','), prefs, [
+        '--resolution',
+        size,
+        '--test-extra-apps',
+        '50',
+      ]);
+    const near = await shot('02-dock-cinema', [up(), 'enter']);
+    area(near, 'cinema');
+    assert.equal(near.pointer, false);
+    assert.equal(near.home_preview.expansion, 1);
+    const widgets = await shot('02-cinema-widgets', [up(), up(), 'enter']);
+    area(widgets, 'widgets');
+    assert.equal(widgets.home_preview.top_expansion, 1);
+    assert.deepEqual(near.home_preview.header.actions, widgets.home_preview.header.actions);
+    const toolbar = await shot('02-widgets-toolbar', [up(3), 'enter']);
+    area(toolbar, 'actions');
+    assert.equal(toolbar.home_preview.top_expansion, 0);
+    assert.deepEqual(toolbar.home_preview.button_amounts, [0, 0, 0]);
+    const reversed = await shot('08-inversao-durante-transicao', [up(3), down(), up(), down(2)]);
+    area(reversed, 'cinema');
+    assert.equal(reversed.home_preview.expansion, 1);
+    assert.equal(reversed.home_preview.top_expansion, 0);
+    const inputs = await shot('15-inputs-depois-de-50-favoritos', [up(3), down(4), 'enter']);
+    area(inputs, 'inputs');
+    const geometry = inputs.home_preview.geometry;
+    assert.equal(geometry.rows, 7);
+    assert.ok(geometry.visible_rows < geometry.rows && geometry.offset > 0);
+    assert.deepEqual(geometry.scroll, { up: [946, 28, 28, 28], down: null });
+
+    const app = await shot('03-dock-primeiro-favorito', [
+      ...Array(20).fill('right'),
+      down(),
+      up(),
+      'left',
+    ]);
+    assert.deepEqual(app.focus, { App: ids[0] });
+    assert.equal(app.home_preview.geometry.offset, 0);
+    const control = app.home_preview.controls.find((c) => c.target.App === ids[3]);
+    const pointer = await shot('04-ponteiro-modo-e-alvo-real', [
+      `preview-motion:move:${centerOf(control)}`,
+      up(),
+    ]);
+    area(pointer, 'cinema');
+    assert.equal(pointer.pointer, true);
+    const weather = widgets.home_preview.controls.find(
+      (c) => c.target.EvolutionWidget === 'weather',
+    );
+    const motion = `preview-motion:move:${centerOf(weather)}`;
+    const selected = await shot('04-ponteiro-seleciona-clima', [up(2), 'await-settled', motion]);
+    assert.deepEqual(selected.focus, { EvolutionWidget: 'weather' });
+    assert.equal(selected.home_preview.simulated_widget_open, null);
+    const residual = `preview-motion:residual:${centerOf(control)}`;
+    const realGap = 'preview-motion:move:1910:1050';
+    area(
+      await shot(
+        '12-residual-e-horizontal-preservam-saldo',
+        [up(2), residual, 'preview-wheel:horizontal', up()],
+        steps(3),
+      ),
+      'cinema',
+    );
+    const cleared = await shot(
+      '12-movimento-sem-alvo-descarta-saldo',
+      [up(2), realGap, up()],
+      steps(3),
+    );
+    assert.deepEqual(cleared.focus, { App: ids[0] });
+    const directional = await shot(
+      '12-direcional-descarta-saldo',
+      [up(2), 'right', up()],
+      steps(3),
+    );
+    assert.deepEqual(directional.focus, { App: ids[1] });
+    const partial = await shot('06-limiar-2-incompleto', [up()], steps(2));
+    assert.deepEqual(partial.focus, { App: ids[0] });
+    area(
+      await shot('06-limiar-2-com-flipped', [up(), 'preview-wheel:flipped'], steps(2)),
+      'cinema',
+    );
+    area(await shot('07-limiar-3-rajada-6', [up(6)], steps(3)), 'widgets');
+    area(await shot('09-inversao-2-de-3', [up(2), down(), down(2)], steps(3)), 'inputs');
+    area(await shot('11-extremo-sem-credito', [up(30), down(2)], steps(3)), 'actions');
+    area(await shot('11-extremo-sem-wrap', [down(30), up(2)], steps(3)), 'inputs');
+    const skipped = await shot('02-areas-opcionais-desativadas', [up()], {
+      ...config,
+      evolution_home: { ...preview, show_top: false, show_center: false },
+    });
+    area(skipped, 'actions');
+    const circular = await shot('15-cinema-circular-independente', [up(), 'right', 'left']);
+    assert.equal(circular.home_preview.first, -1);
+    assert.ok(circular.focus.EvolutionContent);
+    for (const [name, opening] of [
+      ['menu', 'apps,side-menu'],
+      ['dialogo', 'menu'],
+      ['settings', 'settings'],
+      ['mover', 'left,hold'],
+    ]) {
+      const prefs =
+        name === 'mover'
+          ? { ...config, evolution_home: { ...preview, global_position: 'dock' } }
+          : config;
+      const before = await shot(`13-${name}-antes`, [opening], prefs);
+      const after = await shot(`13-${name}-roda-isolada`, [opening, up(6), down(12)], prefs);
+      assert.equal(before.modal, name === 'dialogo' || name === 'menu');
+      assert.deepEqual(
+        [after.page, after.focus, after.modal],
+        [before.page, before.focus, before.modal],
+      );
+      assert.deepEqual(after.preferences.favorites, before.preferences.favorites);
+      assert.equal(after.home_preview.moving, name === 'mover');
+    }
+
+    const check = (state, draft, saved) => {
+      assert.equal(state.subpage.Wheel.steps, draft);
+      assert.equal(state.preferences.evolution_home.wheel_steps, saved);
+      assert.ok(state.ui_text.includes('Passos da roda por área'));
+      assert.ok(state.ui_text.includes(String(draft)));
+    };
+    const initial = await shot('05-sensibilidade-padrao', [nav, up(6)]);
+    check(initial, 1, 1);
+    const step = initial.home_preview.controls.find((c) => c.target.WheelStepsStep === true);
+    const draft = await shot('05-rascunho-2-por-clique', [nav, `click:${centerOf(step)}`], null);
+    check(draft, 2, 1);
+    const beforeSave = await fs.readFile(isolated, 'utf8');
+    const canceled = await shot(
+      '05-cancela-3',
+      [nav, 'right', 'right', 'down', 'down', 'enter'],
+      null,
+    );
+    assert.equal(canceled.subpage, 'Navigation');
+    await shot('05-voltar-descarta', [nav, 'right', 'back'], null);
+    assert.equal(await fs.readFile(isolated, 'utf8'), beforeSave);
+    await fs.chmod(path.dirname(isolated), 0o500);
+    try {
+      const failed = await shot(
+        '05-falha-de-gravacao',
+        [nav, 'right', 'right', 'down', 'enter'],
+        null,
+      );
+      check(failed, 3, 1);
+      assert.equal(failed.focus, 'WheelApply');
+      assert.equal(await fs.readFile(isolated, 'utf8'), beforeSave);
+    } finally {
+      await fs.chmod(path.dirname(isolated), 0o700);
+    }
+    for (const [n, edit] of [
+      [3, ['right', 'right']],
+      [2, ['left']],
+      [1, ['left']],
+    ]) {
+      const applied = await shot(`05-aplica-${n}`, [nav, ...edit, 'down', 'enter'], null);
+      assert.equal(applied.subpage, 'Navigation');
+      assert.equal(applied.preferences.evolution_home.wheel_steps, n);
+      assert.equal(JSON.parse(await fs.readFile(isolated, 'utf8')).evolution_home.wheel_steps, n);
+      const reopened = await shot(`05-reabre-${n}`, [nav], null);
+      check(reopened, n, n);
+      const persisted = await shot(`05-limiar-${n}-salvo-ativo-na-home`, [up(n)], null);
+      area(persisted, 'cinema');
+    }
+  }
 }
 
 async function reviewP02(scenario, capture) {

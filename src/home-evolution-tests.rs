@@ -2,7 +2,7 @@ use super::*;
 use crate::home_evolution::{
     Area, GlobalAction, GlobalPosition, Home, WidgetApp, WidgetAppFixture,
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn preview() -> State {
     let mut state = ready();
@@ -575,6 +575,7 @@ fn inputs_follow_the_last_dock_row_and_reconcile_when_disconnected() {
     let first_dock = state.evolution_geometry().dock_start;
     state.wheel_scroll(&[], None, 0, -1);
     assert_eq!(state.focus, Target::EvolutionArea(Area::Inputs));
+    state.evolution_tick(1.);
     let layout = state.evolution_geometry();
     assert!(layout.offset > 0.);
     assert_eq!(
@@ -584,6 +585,7 @@ fn inputs_follow_the_last_dock_row_and_reconcile_when_disconnected() {
     assert!(!layout.scroll.down && !layout.inputs.is_empty());
     state.wheel_scroll(&[], None, 0, 1);
     assert_eq!(state.focus, Target::EvolutionArea(Area::Dock));
+    state.evolution_tick(1.);
     assert_eq!(state.evolution_geometry().dock_start, first_dock);
     state.direction(Direction::Down, &[]);
     assert!(
@@ -1063,6 +1065,249 @@ fn wheel_expands_areas_before_directions_can_select_items() {
     state.direction(Direction::Right, &[]);
     assert_eq!(state.focus, Target::EvolutionContent("dunes:0".into()));
     assert_eq!(state.evolution.as_ref().unwrap().selected, 0);
+}
+
+#[test]
+fn p03_wheel_reaches_every_area_and_enters_the_first_eligible_control() {
+    let (mut state, ids) = p02_preview();
+    widget_apps(&mut state, true, true);
+    let first_top = state.evolution_top_targets()[0].clone();
+    let first_input = Target::Input(state.evolution_inputs()[0].id.clone());
+    let now = Instant::now();
+
+    for pointer in [false, true] {
+        state.evolution_focus_dock(Target::App(ids[18].clone()));
+        state.pointer = pointer;
+        for (steps, area, expected) in [
+            (3, Area::Actions, first_top.clone()),
+            (
+                -1,
+                Area::Widgets,
+                Target::EvolutionWidget(WidgetApp::Calendar),
+            ),
+            (-1, Area::Cinema, Target::EvolutionContent("dunes:0".into())),
+            (-1, Area::Dock, Target::App(ids[0].clone())),
+            (-1, Area::Inputs, first_input.clone()),
+        ] {
+            assert!(state.evolution_wheel(steps, now));
+            assert_eq!(state.focus, Target::EvolutionArea(area));
+            assert!(state.activate().is_empty());
+            assert_eq!(state.pointer, pointer && area == Area::Actions);
+            assert!(state.direction(Direction::Left, &[]).is_empty());
+            assert_eq!(state.focus, expected);
+        }
+    }
+
+    state.open(0);
+    widget_apps(&mut state, false, false);
+    assert!(state.evolution_wheel(2, now));
+    assert_eq!(state.focus, Target::EvolutionArea(Area::Widgets));
+    assert!(state.direction(Direction::Up, &[]).is_empty());
+    assert_eq!(state.focus, Target::EvolutionArea(Area::Widgets));
+
+    state.open(0);
+    state.preferences.evolution_home.show_top = false;
+    state.preferences.evolution_home.show_center = false;
+    assert!(state.evolution_wheel(1, now));
+    assert_eq!(state.focus, Target::EvolutionArea(Area::Actions));
+    assert!(state.evolution_wheel(-2, now));
+    assert_eq!(state.focus, Target::EvolutionArea(Area::Inputs));
+}
+
+#[test]
+fn p03_wheel_counts_thresholds_and_discards_excess_at_both_extremes() {
+    use crate::home_evolution::WheelSteps;
+    let now = Instant::now();
+    for threshold in [2, 3] {
+        let mut state = preview();
+        state.preferences.evolution_home.wheel_steps =
+            serde_json::from_value::<WheelSteps>(json!(threshold)).unwrap();
+        let initial = state.focus.clone();
+        state.evolution_wheel(threshold - 1, now);
+        assert_eq!(state.focus, initial);
+        state.evolution_wheel(1, now);
+        assert_eq!(state.focus, Target::EvolutionArea(Area::Cinema));
+        state.evolution_wheel(i32::MAX, now);
+        assert_eq!(state.focus, Target::EvolutionArea(Area::Actions));
+        state.evolution_wheel(-(threshold - 1), now);
+        assert_eq!(state.focus, Target::EvolutionArea(Area::Actions));
+        state.evolution_wheel(-1, now);
+        assert_eq!(state.focus, Target::EvolutionArea(Area::Widgets));
+        state.evolution_wheel(i32::MIN, now);
+        assert_eq!(state.focus, Target::EvolutionArea(Area::Inputs));
+        state.evolution_wheel(threshold - 1, now);
+        assert_eq!(state.focus, Target::EvolutionArea(Area::Inputs));
+        state.evolution_wheel(1, now);
+        assert_eq!(state.focus, Target::EvolutionArea(Area::Dock));
+    }
+}
+
+#[test]
+fn p03_wheel_restarts_on_inversion_and_expires_at_800_ms_between_steps() {
+    let now = Instant::now();
+    for saldo in [1, 2] {
+        let mut state = preview();
+        state.preferences.evolution_home.wheel_steps = serde_json::from_value(json!(3)).unwrap();
+        let dock = state.focus.clone();
+        state.evolution_wheel(saldo, now);
+        state.evolution_wheel(-1, now);
+        state.evolution_wheel(-1, now);
+        assert_eq!(state.focus, dock);
+        state.evolution_wheel(-1, now);
+        assert_eq!(state.focus, Target::EvolutionArea(Area::Inputs));
+    }
+
+    for pause in [799, 800, 801] {
+        let mut state = preview();
+        state.preferences.evolution_home.wheel_steps = serde_json::from_value(json!(3)).unwrap();
+        let dock = state.focus.clone();
+        let second = now + Duration::from_millis(799);
+        state.evolution_wheel(1, now);
+        state.evolution_wheel(1, second);
+        assert_eq!(state.focus, dock);
+        let third = second + Duration::from_millis(pause);
+        assert!(!state.evolution_wheel(0, third));
+        state.evolution_wheel(1, third);
+        if pause >= 800 {
+            assert_eq!(state.focus, dock);
+            state.evolution_wheel(1, third);
+            assert_eq!(state.focus, dock);
+            state.evolution_wheel(1, third);
+        }
+        assert_eq!(state.focus, Target::EvolutionArea(Area::Cinema));
+        assert!(state.activate().is_empty());
+    }
+}
+
+#[test]
+fn p03_wheel_resets_only_on_intentional_motion_or_direction() {
+    let now = Instant::now();
+    for (pointer, motion, direction, discarded) in [
+        (false, (0, 0), None, false),
+        (true, (0, 0), None, false),
+        (false, (1, 0), None, true),
+        (true, (0, -1), None, true),
+        (false, (0, 0), Some(Direction::Right), true),
+    ] {
+        let mut state = preview();
+        state.pointer = pointer;
+        state.preferences.evolution_home.wheel_steps = serde_json::from_value(json!(3)).unwrap();
+        state.evolution_wheel(2, now);
+        let focus = state.focus.clone();
+        assert_eq!(
+            state.evolution_pointer_motion(motion.0, motion.1),
+            motion != (0, 0)
+        );
+        assert_eq!(state.focus, focus);
+        if let Some(direction) = direction {
+            assert!(state.direction(direction, &[]).is_empty());
+        }
+        let focus = state.focus.clone();
+        state.evolution_wheel(1, now);
+        if discarded {
+            assert_eq!(state.focus, focus);
+            state.evolution_wheel(2, now);
+        }
+        assert_eq!(state.focus, Target::EvolutionArea(Area::Cinema));
+    }
+}
+
+#[test]
+fn p03_wheel_retargets_expansion_and_viewport_before_the_previous_tween_finishes() {
+    let (mut state, _) = p02_preview();
+    state.preferences.reduced_motion = false;
+    let now = Instant::now();
+    state.evolution_wheel(1, now);
+    state.evolution_tick(0.12);
+    let expansion = state.evolution.as_ref().unwrap().expansion.value;
+    assert!(expansion > 0. && expansion < 1.);
+    state.evolution_wheel(2, now);
+    assert_eq!(state.focus, Target::EvolutionArea(Area::Actions));
+    assert_eq!(state.evolution.as_ref().unwrap().expansion.value, expansion);
+    state.evolution_tick(0.10);
+    let closing = state.evolution.as_ref().unwrap().expansion.value;
+    assert!(closing > 0. && closing < expansion);
+    state.evolution_wheel(-2, now);
+    assert_eq!(state.focus, Target::EvolutionArea(Area::Cinema));
+    assert_eq!(state.evolution.as_ref().unwrap().expansion.value, closing);
+    state.evolution_tick(0.06);
+    assert!(state.evolution.as_ref().unwrap().expansion.value > closing);
+
+    state.evolution_wheel(-2, now);
+    assert_eq!(state.focus, Target::EvolutionArea(Area::Inputs));
+    state.evolution_tick(0.12);
+    let offset = state.evolution_geometry().offset;
+    assert!(state.evolution.as_ref().unwrap().wheel_viewport_moving());
+    assert!(offset > 0.);
+    state.evolution_wheel(2, now);
+    assert_eq!(state.focus, Target::EvolutionArea(Area::Cinema));
+    assert_eq!(state.evolution_geometry().offset, offset);
+    state.evolution_tick(1.);
+    assert_eq!(state.evolution_geometry().offset, 0.);
+    assert_eq!(state.evolution.as_ref().unwrap().expansion.value, 1.);
+}
+
+#[test]
+fn p03_wheel_is_ignored_in_menu_dialog_settings_and_move() {
+    let mut state = preview();
+    state.preferences.evolution_home.wheel_steps = serde_json::from_value(json!(2)).unwrap();
+    let dock = state.focus.clone();
+    let now = Instant::now();
+    state.evolution_wheel(1, now);
+    // The Home preview has no side-menu entry point. Exercise a covered Home surface directly.
+    let menu = Target::Nav(0);
+    state.overlay = Some(Overlay::Menu {
+        restore: dock.clone(),
+    });
+    state.focus = menu.clone();
+    assert!(!state.wheel_scroll(&[], None, 0, 100));
+    assert_eq!(state.focus, menu);
+    state.back();
+    assert_eq!(state.focus, dock);
+    state.evolution_wheel(1, now);
+    assert_eq!(state.focus, dock);
+
+    state.options();
+    let option = state.focus.clone();
+    assert!(state.overlay.is_some());
+    assert!(!state.wheel_scroll(&[], None, 0, 100));
+    assert_eq!(state.focus, option);
+    state.back();
+    state.evolution_start_move(dock.clone());
+    assert!(state.evolution_moving());
+    assert!(!state.wheel_scroll(&[], None, 0, 100));
+    assert_eq!(state.focus, dock);
+
+    state.open(2);
+    let setting = state.focus.clone();
+    assert!(!state.wheel_scroll(&[], None, 0, 100));
+    assert_eq!(state.page, Page::Settings);
+    assert_eq!(state.focus, setting);
+}
+
+#[test]
+fn p03_wheel_preference_decodes_only_supported_values() {
+    use crate::home_evolution::Preferences;
+    assert_eq!(Preferences::default().wheel_steps.value(), 1);
+    for (stored, expected) in [
+        (json!(1), 1),
+        (json!(2), 2),
+        (json!(3), 3),
+        (json!(4), 1),
+        (json!(-1), 1),
+        (json!(2.0), 1),
+        (json!("3"), 1),
+        (json!(null), 1),
+    ] {
+        let prefs: Preferences =
+            serde_json::from_value(json!({"wheel_steps": stored, "show_center": false})).unwrap();
+        assert!(!prefs.show_center);
+        assert_eq!(prefs.wheel_steps.value(), expected);
+        assert_eq!(
+            serde_json::to_value(prefs).unwrap()["wheel_steps"],
+            expected
+        );
+    }
 }
 
 #[test]

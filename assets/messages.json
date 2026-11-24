@@ -79,6 +79,38 @@
     "sv": "Välj var Alla appar och Inställningar visas på hemskärmen.",
     "cs": "Vyberte, kde se na domovské obrazovce zobrazí aplikace a nastavení."
   },
+  "evolutionWheel": {
+    "en": "Magic Remote wheel",
+    "de": "Scrollrad der Magic Remote",
+    "es": "Rueda del Magic Remote",
+    "zh": "动感遥控器滚轮",
+    "zh-tw": "動感遙控器滾輪",
+    "pt": "Roda do Magic Remote",
+    "it": "Rotellina del Magic Remote",
+    "ru": "Колесо Magic Remote",
+    "pl": "Rolka pilota Magic Remote",
+    "fr": "Molette de la Magic Remote",
+    "vi": "Con lăn Magic Remote",
+    "nl": "Scrollwiel van de Magic Remote",
+    "sv": "Rullhjul på Magic Remote",
+    "cs": "Kolečko ovladače Magic Remote"
+  },
+  "evolutionWheelSteps": {
+    "en": "Wheel steps per area",
+    "de": "Scrollschritte pro Bereich",
+    "es": "Pasos de rueda por área",
+    "zh": "切换区域所需滚动步数",
+    "zh-tw": "切換區域所需捲動步數",
+    "pt": "Passos da roda por área",
+    "it": "Passi della rotellina per area",
+    "ru": "Шагов колеса для смены области",
+    "pl": "Liczba kroków rolki na obszar",
+    "fr": "Pas de molette par zone",
+    "vi": "Số bước cuộn mỗi khu vực",
+    "nl": "Scrollstappen per gebied",
+    "sv": "Rullsteg per område",
+    "cs": "Kroky kolečka na oblast"
+  },
   "evolutionTop": {
     "en": "Top",
     "de": "Oben",

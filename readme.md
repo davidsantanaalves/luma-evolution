@@ -45,6 +45,9 @@ In Settings → Interface → Cinema, preview and save the compact Home's 16:9 c
 It defaults to 100% and accepts 40% to 100% in steps of 10 percentage points. With the widget area
 expanded, Cinema stays compact and uses 50% of the reference size. See the
 [R13 desktop captures](docs/home-stage02-r13-aceite.md).
+In the desktop preview, the wheel moves between eligible Home areas. In Settings → Interface →
+Navigation → Magic Remote wheel, choose one, two or three logical wheel steps per area.
+One step is the default.
 The [R1–R4 review](docs/home-stage02-review.md) adds horizontal 16:10 favorites, Inputs revealed
 after vertical navigation, weather over the wallpaper and a compact header during cinema expansion.
 The [R5–R9 review](docs/home-stage02-r5-r9.md) covers Dock/header alignment, expanded upper

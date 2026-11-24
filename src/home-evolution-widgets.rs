@@ -288,6 +288,7 @@ impl State {
         } else {
             0.
         };
+        let offset = home.wheel_viewport_offset(offset);
         let mut layout = flow.layout(offset, inputs.len(), home.input_anchor);
         let bottom = flow.pane.y - CINEMA_DOCK_GAP;
         // On a crowded Home, use spare spacing before shrinking cards. The remaining header

@@ -6339,7 +6339,7 @@ fn preview_frame(out: &mut Scene, state: &State) {
     out.border(PREVIEW, 18., 1., c(0xffffff, 0.14));
     if matches!(
         state.subpage,
-        Some(Subpage::Dock { .. } | Subpage::Cinema { .. })
+        Some(Subpage::Dock { .. } | Subpage::Cinema { .. } | Subpage::Wheel { .. })
     ) {
         return;
     }
@@ -6602,6 +6602,12 @@ fn breadcrumb(state: &State) -> Vec<&str> {
                     state.preferences.input_title(input)
                 }),
         ]),
+        Some(Subpage::Wheel { .. }) => {
+            path.extend([
+                language.t("evolutionNavigation"),
+                language.t("evolutionWheel"),
+            ]);
+        }
         Some(subpage) => path.push(match subpage {
             Subpage::AppNames => language.t("appNames"),
             Subpage::Greeting => language.t("greeting"),
@@ -6943,6 +6949,25 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
             cinema_settings(out, state, assets, scale, prompt);
             return;
         }
+        if let Subpage::Wheel { steps } = *subpage {
+            settings_steppers(
+                out,
+                state,
+                assets,
+                &[
+                    (Target::WheelSteps, "evolutionWheelSteps"),
+                    (Target::WheelApply, "evolutionApply"),
+                    (Target::WheelCancel, "cancel"),
+                ],
+                None,
+                &[SettingStepper {
+                    target: Target::WheelSteps,
+                    step: Target::WheelStepsStep,
+                    label: &steps.value().to_string(),
+                }],
+            );
+            return;
+        }
         if *subpage == Subpage::About {
             let panel = Rect::new(LIST_X, LIST_TOP, LIST_WIDTH, 170.);
             out.glass(panel, 20.);
@@ -7013,7 +7038,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
             return;
         }
         let options: Vec<(&str, Option<&str>, bool)> = match subpage {
-            Subpage::Dock { .. } | Subpage::Cinema { .. } => {
+            Subpage::Dock { .. } | Subpage::Cinema { .. } | Subpage::Wheel { .. } => {
                 unreachable!("Scale settings are drawn above the choice list")
             }
             Subpage::About => unreachable!("About is drawn above the choice list"),
@@ -7026,6 +7051,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                         position == state.preferences.evolution_home.global_position,
                     )
                 })
+                .chain(std::iter::once((language.t("evolutionWheel"), None, false)))
                 .collect(),
             Subpage::LampaFeed => crate::model::LampaFeed::ALL
                 .iter()
@@ -7173,7 +7199,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     value: None,
                     description,
                     selected,
-                    chevron: false,
+                    chevron: *subpage == Subpage::Navigation && index == 2,
                 },
             );
         }

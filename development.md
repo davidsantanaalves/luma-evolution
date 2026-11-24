@@ -94,6 +94,17 @@ o sucessor elegível e depois o antecessor na ordem anterior. Um processo novo c
 favorito elegível da ordem salva. No ext4, `xvfb-run -a pnpm test:home-preview --p02` valida o
 P02 e usa permissões Linux para simular falha de gravação. Ver o [roteiro P02](https://drive.google.com/file/d/1iCzI3gkzD0pnELxs9fJyKLLN5dptEqlZ/view).
 
+No P03, **Interface → Navegação → Roda do Magic Remote** deixa escolher 1, 2 ou 3 passos
+lógicos por área, com padrão 1. Aplicar grava `evolution_home.wheel_steps`. Cancelar ou
+Voltar descarta o rascunho. No preview, o eixo vertical inteiro de `SDL_MOUSEWHEEL` fornece
+os passos lógicos, respeitando a indicação de direção invertida do SDL. A roda ativa a área
+adjacente elegível. O primeiro direcional depois da roda seleciona o primeiro item elegível
+da área, ou o primeiro favorito no Dock. A inversão, a inatividade de 800 ms e o uso
+intencional de direcionais ou movimento do ponteiro limpam o saldo parcial.
+`xvfb-run -a pnpm test:home-preview --p03` valida o preview desktop OpenGL ES a 720p e 1080p.
+A entrega de eventos e sua relação com o gesto físico na LG C1 seguem sem validação.
+Ver o [roteiro P03](https://drive.google.com/file/d/1SfwAyJjQLQGtFpQFRs2RLJMI39_6K5-Q/view).
+
 ## Toolchain and commands
 
 ```sh

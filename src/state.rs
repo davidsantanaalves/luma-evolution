@@ -1,4 +1,4 @@
-use crate::home_evolution::{CinemaScale, DockHorizontal, DockScale};
+use crate::home_evolution::{CinemaScale, DockHorizontal, DockScale, WheelSteps};
 use crate::i18n::Language;
 use crate::model::{
     App, BACKGROUNDS, CATEGORIES, CUSTOM_TILE_PREFIX, CustomTile, INPUT_NAME_LIMIT, InputMode,
@@ -98,6 +98,10 @@ pub enum Target {
     ClearSearch,
     Sidebar(usize),
     Setting(usize),
+    WheelSteps,
+    WheelStepsStep(bool),
+    WheelApply,
+    WheelCancel,
     DockScale,
     DockScaleStep(bool),
     DockHorizontal,
@@ -337,6 +341,9 @@ const TODAY_OPEN: f32 = 0.25;
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum Subpage {
     Navigation,
+    Wheel {
+        steps: WheelSteps,
+    },
     Dock {
         scale: DockScale,
         horizontal: DockHorizontal,
@@ -408,6 +415,7 @@ pub enum Effect {
         horizontal: DockHorizontal,
     },
     SaveCinemaScale(CinemaScale),
+    SaveWheelSteps(WheelSteps),
     /// Read the app inventory again, keeping decoded icons of unchanged apps.
     Refresh,
     /// Refresh apps: read the inventory and every app icon again.
@@ -869,6 +877,7 @@ impl State {
         (self.evolution_active()
             && self.evolution.as_ref().is_some_and(|home| {
                 home.expansion.moving()
+                    || home.wheel_viewport_moving()
                     || home.top_expansion.moving()
                     || home.top_label.moving()
                     || home.button_focus.iter().any(|t| t.moving())
@@ -1150,6 +1159,7 @@ impl State {
 
     pub fn open(&mut self, index: usize) {
         self.weather.cancel_search();
+        self.evolution_discard_wheel();
         self.evolution_reconcile_dock();
         let from_home = self.page == Page::Home;
         self.page = match index {
@@ -1385,8 +1395,8 @@ impl State {
         x: i32,
         y: i32,
     ) -> bool {
-        if self.evolution_active() {
-            return self.evolution_wheel(y);
+        if self.evolution.is_some() && self.page == Page::Home {
+            return self.evolution_wheel(y, Instant::now());
         }
         let backgrounds =
             self.page == Page::Settings && self.section == 1 && self.subpage.is_none();
@@ -2271,6 +2281,10 @@ impl State {
         self.pointer = false;
         self.focus = match self.subpage.take() {
             Some(Subpage::Navigation) => Target::Setting(NAVIGATION_ROW),
+            Some(Subpage::Wheel { .. }) => {
+                self.subpage = Some(Subpage::Navigation);
+                Target::Choice(2)
+            }
             Some(Subpage::Dock { .. }) => Target::Setting(DOCK_ROW),
             Some(Subpage::Cinema { .. }) => Target::Setting(CINEMA_ROW),
             Some(Subpage::About) => Target::Setting(ABOUT_ROW),
@@ -2391,6 +2405,19 @@ impl State {
         self.close_subpage();
     }
 
+    fn step_wheel_steps(&mut self, increase: bool) {
+        if let Some(Subpage::Wheel { steps }) = &mut self.subpage {
+            *steps = steps.stepped(increase);
+            self.dirty = true;
+        }
+    }
+
+    pub fn wheel_steps_saved(&mut self, steps: WheelSteps) {
+        self.preferences.evolution_home.wheel_steps = steps;
+        self.evolution_discard_wheel();
+        self.close_subpage();
+    }
+
     /// Gives a team Liquipedia has no logo for the feeds server's copy of HLTV's, until
     /// Liquipedia has one: the feed is replaced on each refresh, so this runs after each.
     pub fn cs2_fill_logos(&mut self) {
@@ -2453,6 +2480,7 @@ impl State {
     }
 
     pub fn direction(&mut self, direction: Direction, controls: &[Control]) -> Vec<Effect> {
+        self.evolution_discard_wheel();
         self.pointer = false;
         self.dirty = true;
         if self.evolution_active() && self.moving.is_none() {
@@ -2608,7 +2636,17 @@ impl State {
                 self.focus = Target::CinemaScale;
                 return vec![];
             }
+            if matches!(self.focus, Target::WheelSteps | Target::WheelStepsStep(_))
+                && matches!(direction, Direction::Left | Direction::Right)
+            {
+                self.step_wheel_steps(matches!(direction, Direction::Right));
+                self.focus = Target::WheelSteps;
+                return vec![];
+            }
             let setting_rows: Option<&[Target]> = match self.subpage {
+                Some(Subpage::Wheel { .. }) => {
+                    Some(&[Target::WheelSteps, Target::WheelApply, Target::WheelCancel])
+                }
                 Some(Subpage::Dock {
                     confirming_restore: true,
                     ..
@@ -2657,6 +2695,8 @@ impl State {
                             && matches!(self.focus, Target::DockHorizontalStep(_)))
                         || (*target == Target::CinemaScale
                             && matches!(self.focus, Target::CinemaScaleStep(_)))
+                        || (*target == Target::WheelSteps
+                            && matches!(self.focus, Target::WheelStepsStep(_)))
                 })
             {
                 match direction {
@@ -2694,7 +2734,6 @@ impl State {
                         | Subpage::TimeFormat
                         | Subpage::Temperature
                         | Subpage::TextRendering
-                        | Subpage::Navigation
                         | Subpage::HomeTakeover,
                     ) => 2,
                     Some(Subpage::Language) => Language::ALL.len(),
@@ -4257,6 +4296,15 @@ impl State {
             }
             Target::DockScaleStep(increase) => self.step_dock_scale(increase),
             Target::DockHorizontalStep(increase) => self.step_dock_horizontal(increase),
+            Target::WheelStepsStep(increase) => self.step_wheel_steps(increase),
+            Target::WheelApply => {
+                if let Some(Subpage::Wheel { steps }) = self.subpage {
+                    return vec![Effect::SaveWheelSteps(steps)];
+                }
+            }
+            Target::WheelCancel if matches!(self.subpage, Some(Subpage::Wheel { .. })) => {
+                self.close_subpage();
+            }
             Target::DockApply => {
                 if let Some(Subpage::Dock {
                     scale,
@@ -4334,6 +4382,14 @@ impl State {
             }
             Target::Choice(index) => {
                 match self.subpage.clone() {
+                    Some(Subpage::Navigation) if index == 2 => {
+                        self.subpage = Some(Subpage::Wheel {
+                            steps: self.preferences.evolution_home.wheel_steps,
+                        });
+                        self.focus = Target::WheelSteps;
+                        self.scroll = 0.;
+                        return vec![];
+                    }
                     Some(Subpage::Navigation) => {
                         self.preferences.evolution_home.global_position =
                             crate::home_evolution::GlobalPosition::ALL[index.min(1)];
@@ -4409,6 +4465,7 @@ impl State {
                         | Subpage::Weather
                         | Subpage::Shortcuts
                         | Subpage::Inputs
+                        | Subpage::Wheel { .. }
                         | Subpage::Dock { .. }
                         | Subpage::Cinema { .. }
                         | Subpage::Crypto,
@@ -4564,6 +4621,7 @@ impl State {
     }
 
     pub fn back(&mut self) -> Vec<Effect> {
+        self.evolution_discard_wheel();
         self.pointer = false;
         self.dirty = true;
         if self.evolution_active() && self.evolution_moving() {

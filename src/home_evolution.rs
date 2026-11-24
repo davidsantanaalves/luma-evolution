@@ -96,6 +96,7 @@ pub struct Preferences {
     #[serde(deserialize_with = "deserialize_dock_horizontal")]
     pub dock_horizontal: DockHorizontal,
     pub compact_cinema_scale: CinemaScale,
+    pub wheel_steps: WheelSteps,
     pub hover_ms: u64,
     pub leave_ms: u64,
     pub pointer_expands: bool,
@@ -278,6 +279,7 @@ impl Default for Preferences {
             cinema_dock_scale: DockScale::default(),
             dock_horizontal: DockHorizontal::default(),
             compact_cinema_scale: CinemaScale::default(),
+            wheel_steps: WheelSteps::default(),
             hover_ms: 250,
             leave_ms: 350,
             pointer_expands: true,
@@ -287,6 +289,41 @@ impl Default for Preferences {
             global_position: GlobalPosition::Top,
             global_slots: [0, 1],
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct WheelSteps(u8);
+
+impl WheelSteps {
+    pub fn value(self) -> u8 {
+        self.0
+    }
+
+    pub fn stepped(self, increase: bool) -> Self {
+        Self(if increase {
+            (self.0 + 1).min(3)
+        } else {
+            (self.0 - 1).max(1)
+        })
+    }
+}
+
+impl Default for WheelSteps {
+    fn default() -> Self {
+        Self(1)
+    }
+}
+
+impl<'de> Deserialize<'de> for WheelSteps {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(d)?;
+        Ok(match value.as_u64() {
+            Some(2) => Self(2),
+            Some(3) => Self(3),
+            _ => Self::default(),
+        })
     }
 }
 
@@ -364,6 +401,14 @@ pub enum Area {
     Cinema,
     Dock,
     Inputs,
+}
+
+const WHEEL_IDLE: Duration = Duration::from_millis(800);
+
+struct WheelPartial {
+    up: bool,
+    steps: u8,
+    last_step: Instant,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -474,6 +519,10 @@ pub struct Home {
     pub rotation_trace_selected: i64,
     pub pointer_in_cinema: bool,
     pub pointer_target: Option<Target>,
+    wheel_partial: Option<WheelPartial>,
+    // Area focus is also used outside wheel navigation, e.g. after a widget disappears.
+    wheel_entry: bool,
+    wheel_viewport: Option<(f32, Tween)>,
     pub suspended: bool,
     /// The SDL loop advances the rotation only after processing pending input.
     pub defer_rotation: bool,
@@ -505,6 +554,26 @@ pub fn compact_header(prefs: &crate::model::Preferences, now: time::OffsetDateTi
 }
 
 impl Home {
+    pub fn wheel_viewport_moving(&self) -> bool {
+        self.wheel_viewport.is_some()
+    }
+
+    fn wheel_viewport_offset(&self, target: f32) -> f32 {
+        self.wheel_viewport
+            .as_ref()
+            .map_or(target, |(from, tween)| from + (target - from) * tween.value)
+    }
+
+    fn expire_wheel(&mut self, now: Instant) {
+        if self
+            .wheel_partial
+            .as_ref()
+            .is_some_and(|partial| now.duration_since(partial.last_step) >= WHEEL_IDLE)
+        {
+            self.wheel_partial = None;
+        }
+    }
+
     pub fn dock_caption_transition(&self) -> f32 {
         self.expansion.value.max(self.top_expansion.value * 0.7)
     }
@@ -999,6 +1068,8 @@ impl State {
             self.evolution_snapshot_dock_order();
         }
         if let Some(home) = self.evolution.as_mut() {
+            home.wheel_entry = false;
+            home.wheel_viewport = None;
             home.inputs_revealed = false;
             home.top_open = false;
             home.dock_in_view = index.is_some();
@@ -1020,6 +1091,7 @@ impl State {
     pub fn evolution_start_move(&mut self, target: Target) {
         let items = self.evolution_dock_items();
         if items.contains(&target) {
+            self.evolution_discard_wheel();
             self.evolution_focus_dock(target);
             let home = self.evolution.as_mut().unwrap();
             home.moving_dock = Some(items);
@@ -1127,12 +1199,33 @@ impl State {
         self.notify(format!("Preview · abertura simulada: {name}"));
     }
 
-    pub fn evolution_wheel(&mut self, y: i32) -> bool {
-        if y == 0 || self.evolution_moving() || self.moving.is_some() {
+    pub fn evolution_discard_wheel(&mut self) {
+        if let Some(home) = &mut self.evolution {
+            home.wheel_partial = None;
+        }
+    }
+
+    pub fn evolution_pointer_motion(&mut self, xrel: i32, yrel: i32) -> bool {
+        if !self.evolution_active() {
+            return true;
+        }
+        if xrel == 0 && yrel == 0 {
+            return false;
+        }
+        self.evolution_discard_wheel();
+        true
+    }
+
+    pub fn evolution_wheel(&mut self, y: i32, now: Instant) -> bool {
+        if !self.evolution_active() || self.evolution_moving() || self.moving.is_some() {
+            self.evolution_discard_wheel();
+            return false;
+        }
+        if y == 0 {
             return false;
         }
         let top = self.evolution_top_targets();
-        let current = match &self.focus {
+        let mut current = match &self.focus {
             Target::EvolutionArea(area) => *area,
             Target::EvolutionWidget(_) => Area::Widgets,
             Target::EvolutionContent(_) => Area::Cinema,
@@ -1147,35 +1240,76 @@ impl State {
             (Area::Dock, true),
             (Area::Inputs, !self.evolution_inputs().is_empty()),
         ];
-        let next = if y > 0 {
-            areas
-                .iter()
-                .rev()
-                .find(|(area, enabled)| *enabled && (*area as u8) < current as u8)
-        } else {
-            areas
-                .iter()
-                .find(|(area, enabled)| *enabled && (*area as u8) > current as u8)
-        };
+        let up = y > 0;
+        let threshold = self.preferences.evolution_home.wheel_steps.value();
+        let animate = !self.preferences.reduced_motion
+            && self.preferences.evolution_home.motion_profile == MotionProfile::Balanced;
+        let from = animate.then(|| self.evolution_geometry().offset);
+        let mut changed_area = false;
         let home = self.evolution.as_mut().unwrap();
-        home.cancel_hover();
-        if let Some((area, _)) = next {
-            self.focus = Target::EvolutionArea(*area);
+        home.expire_wheel(now);
+        let mut steps = y.unsigned_abs();
+        while steps != 0 {
+            let next = if up {
+                areas
+                    .iter()
+                    .rfind(|(area, enabled)| *enabled && (*area as u8) < current as u8)
+            } else {
+                areas
+                    .iter()
+                    .find(|(area, enabled)| *enabled && (*area as u8) > current as u8)
+            };
+            let Some(&(area, _)) = next else {
+                home.wheel_partial = None;
+                break;
+            };
+            let previous = home
+                .wheel_partial
+                .take()
+                .filter(|partial| partial.up == up && partial.steps < threshold)
+                .map_or(0, |partial| partial.steps);
+            let needed = u32::from(threshold - previous);
+            if steps < needed {
+                home.wheel_partial = Some(WheelPartial {
+                    up,
+                    steps: previous + steps as u8,
+                    last_step: now,
+                });
+                break;
+            }
+            steps -= needed;
+            current = area;
+            self.focus = Target::EvolutionArea(area);
             self.pressed = None;
+            home.wheel_entry = true;
+            home.cancel_hover();
             home.pointer_target = None;
             home.pointer_in_cinema = false;
-            home.set_widgets_open(*area == Area::Widgets);
-            home.expanded = *area == Area::Cinema;
-            home.inputs_revealed = *area == Area::Inputs;
-            home.dock_in_view = *area == Area::Dock;
+            home.set_widgets_open(area == Area::Widgets);
+            home.expanded = area == Area::Cinema;
+            home.inputs_revealed = area == Area::Inputs;
+            home.dock_in_view = area == Area::Dock;
+            changed_area = true;
+        }
+        if changed_area {
+            home.wheel_viewport = None;
+            if let Some(from) = from
+                && from != self.evolution_geometry().offset
+            {
+                let mut progress = Tween::default();
+                progress.advance(1., 0., 0.30, false);
+                self.evolution.as_mut().unwrap().wheel_viewport = Some((from, progress));
+            }
             self.dirty = true;
         }
         true
     }
 
     pub fn evolution_direction(&mut self, direction: Direction) {
-        self.evolution.as_mut().unwrap().pointer_in_cinema = false;
-        self.evolution.as_mut().unwrap().pointer_target = None;
+        let home = self.evolution.as_mut().unwrap();
+        let wheel_entry = std::mem::take(&mut home.wheel_entry);
+        home.pointer_in_cinema = false;
+        home.pointer_target = None;
         self.evolution_reconcile_widgets();
         self.evolution.as_mut().unwrap().cancel_hover();
         let prefs = &self.preferences.evolution_home;
@@ -1292,7 +1426,9 @@ impl State {
                 (Target::EvolutionWidget(_), Direction::Down) => from_widgets_down(),
                 (Target::EvolutionWidget(_), _) => None,
                 (Target::EvolutionArea(Area::Actions), _) => top_entry,
-                (Target::EvolutionArea(Area::Widgets), _) if widgets.is_some() => widgets,
+                (Target::EvolutionArea(Area::Widgets), _) if wheel_entry || widgets.is_some() => {
+                    widgets
+                }
                 (Target::EvolutionArea(Area::Widgets), Direction::Up) => top_entry,
                 (Target::EvolutionArea(Area::Widgets), Direction::Down) => from_widgets_down(),
                 (Target::EvolutionArea(Area::Widgets), _) => None,
@@ -1302,6 +1438,10 @@ impl State {
                     Some(self.evolution_center_target())
                 }
                 (Target::EvolutionArea(Area::Cinema), _) => None,
+                (Target::EvolutionArea(Area::Dock), _) if wheel_entry => dock
+                    .iter()
+                    .find(|target| matches!(target, Target::App(_)))
+                    .cloned(),
                 (Target::EvolutionArea(Area::Dock), _) => Some(dock_focus),
                 (Target::EvolutionArea(Area::Inputs), _) => inputs.first().cloned(),
                 (Target::EvolutionContent(_), Direction::Down)
@@ -1324,6 +1464,7 @@ impl State {
                 self.evolution.as_mut().unwrap().dock_in_view = false;
             }
             let home = self.evolution.as_mut().unwrap();
+            home.wheel_viewport = None;
             home.expanded = matches!(self.focus, Target::EvolutionContent(_));
             if home.expanded {
                 home.rotation.paused = true;
@@ -1338,6 +1479,9 @@ impl State {
     }
     pub fn evolution_hover_gap(&mut self, position: Option<(f32, f32)>, now: Instant) {
         if !self.evolution_active() || !self.pointer {
+            return;
+        }
+        if self.evolution.as_ref().unwrap().wheel_entry {
             return;
         }
         if self.evolution.as_ref().unwrap().top_open
@@ -1375,6 +1519,9 @@ impl State {
             return;
         }
         let home = self.evolution.as_mut().unwrap();
+        if target.is_some() {
+            home.wheel_entry = false;
+        }
         let open = matches!(target, Some(Target::EvolutionWidget(_)));
         self.dirty |= open != home.top_open;
         home.set_widgets_open(open);
@@ -1407,6 +1554,7 @@ impl State {
     pub fn evolution_tick(&mut self, dt: f32) {
         if !self.evolution_active() {
             if let Some(home) = self.evolution.as_mut() {
+                home.wheel_partial = None;
                 home.rotation.paused = true;
                 home.rotation.started = None;
             }
@@ -1424,6 +1572,7 @@ impl State {
             .iter()
             .position(|t| focused == Some(t));
         let home = self.evolution.as_mut().unwrap();
+        home.expire_wheel(Instant::now());
         let eligible = prefs.rotation_enabled
             && !home.suspended
             && prefs.show_center
@@ -1475,6 +1624,12 @@ impl State {
         let duration = if home.expanded { 0.32 } else { 0.30 };
         let instant =
             self.preferences.reduced_motion || prefs.motion_profile != MotionProfile::Balanced;
+        if let Some((_, progress)) = &mut home.wheel_viewport {
+            self.dirty |= progress.advance(1., dt, 0.30, instant);
+            if !progress.moving() {
+                home.wheel_viewport = None;
+            }
+        }
         let top_target = home.top_open;
         self.dirty |=
             home.top_expansion
