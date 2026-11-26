@@ -131,24 +131,24 @@ try {
   assert.deepEqual(recentHomeBack.focus, { Recent: 'netflix' });
   const recentYoutube = await scenario('recents-youtube', 'recents,await-recents,right');
   assert.deepEqual(recentYoutube.focus, { Recent: 'youtube.leanback.v4' });
-  const appOptions = await scenario('app-options', 'apps,enter');
+  const appOptions = await scenario('app-options', 'apps,menu');
   assert.deepEqual(appOptions.focus, 'OpenApp');
   assert.ok(appOptions.ui_text.includes('Delete app'));
-  const deleteFocused = await scenario('delete-focused', 'apps,enter,down,down,down');
+  const deleteFocused = await scenario('delete-focused', 'apps,menu,down,down,down');
   assert.deepEqual(deleteFocused.focus, { Option: 2 });
-  const deleteConfirm = await scenario('delete-confirm', 'apps,enter,down,down,down,enter');
+  const deleteConfirm = await scenario('delete-confirm', 'apps,menu,down,down,down,enter');
   assert.deepEqual(deleteConfirm.focus, 'CancelDelete');
   assert.ok(deleteConfirm.ui_text.some((value) => value.includes('uninstall “Netflix”')));
-  const deleteCancel = await scenario('delete-cancel', 'apps,enter,down,down,down,enter,enter');
+  const deleteCancel = await scenario('delete-cancel', 'apps,menu,down,down,down,enter,enter');
   assert.deepEqual(deleteCancel.focus, { Option: 2 });
   assert.ok(deleteCancel.apps.includes('netflix'));
-  const hidden = await scenario('apps', 'apps,enter,down,down,enter');
+  const hidden = await scenario('apps', 'apps,menu,down,down,enter');
   assert.ok(hidden.preferences.hidden.includes('netflix'));
   assert.deepEqual(hidden.focus, { App: 'youtube.leanback.v4' });
   // Reload from disk, find Netflix in Hidden, and restore it.
   const restored = await scenario(
     'restored',
-    'apps,up,right,right,right,right,right,enter,down,enter,down,down,enter',
+    'apps,up,right,right,right,right,right,enter,down,menu,down,down,enter',
   );
   assert.deepEqual(restored.preferences.hidden, []);
   const searched = await scenario('search', 'apps,type:YouTube,back');

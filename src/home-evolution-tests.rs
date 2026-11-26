@@ -2,6 +2,7 @@ use super::*;
 use crate::home_evolution::{
     Area, GlobalAction, GlobalPosition, Home, WidgetApp, WidgetAppFixture,
 };
+use crate::i18n::Language;
 use std::time::{Duration, Instant};
 
 fn preview() -> State {
@@ -130,15 +131,15 @@ fn p02_applying_horizontal_policy_keeps_the_dock_selection_and_scale() {
     state.direction(Direction::Down, &[]);
     state.direction(Direction::Left, &[]);
     assert_eq!(state.focus, Target::DockHorizontal);
-    state.direction(Direction::Down, &[]);
+    state.focus = Target::DockApply;
+    let [Effect::SaveVisual(draft)] = state.activate()[..] else {
+        panic!("expected staged save")
+    };
+    state.visual_saved(draft);
     assert_eq!(
-        state.activate(),
-        vec![Effect::SaveDockSettings {
-            scale,
-            horizontal: DockHorizontal::Stop
-        }]
+        state.preferences.evolution_home.dock_horizontal,
+        DockHorizontal::Stop
     );
-    state.dock_settings_saved(scale, DockHorizontal::Stop);
     assert_eq!(state.focus, Target::Setting(DOCK_ROW));
     state.open(0);
     assert_eq!(state.focus, selected);
@@ -452,7 +453,7 @@ fn preview_preferences_round_trip_without_restoring_navigation_state() {
     let json = serde_json::to_vec(&state.preferences).unwrap();
     let restored: Preferences = serde_json::from_slice(&json).unwrap();
     assert!(!restored.evolution_home.show_top);
-    assert_eq!(restored.evolution_home.hover_ms, 410);
+    assert_eq!(restored.evolution_home.hover_ms, 400);
     assert!(State::new(restored).evolution.is_none());
     let legacy: Preferences = serde_json::from_str("{}").unwrap();
     assert_eq!(legacy.evolution_home.hover_ms, 250);
@@ -495,7 +496,12 @@ fn changing_navigation_position_restores_the_same_action_and_preserves_favorites
         state.activate();
         assert_eq!(state.subpage, Some(crate::state::Subpage::Navigation));
         state.focus = Target::Choice(position.index());
-        assert_eq!(state.activate(), vec![Effect::Save]);
+        assert!(state.activate().is_empty());
+        state.focus = Target::VisualAction(crate::home_visual::Action::Apply);
+        let [Effect::SaveVisual(draft)] = state.activate()[..] else {
+            panic!("expected staged save")
+        };
+        state.visual_saved(draft);
         assert_eq!(state.focus, Target::Setting(crate::state::NAVIGATION_ROW));
         state.back();
         state.back();
@@ -648,7 +654,7 @@ fn legacy_square_preference_migrates_without_losing_favorites_or_other_settings(
             GlobalPosition::Dock
         );
         assert_eq!(restored.evolution_home.global_slots, [4, 2]);
-        assert_eq!(restored.evolution_home.hover_ms, 420);
+        assert_eq!(restored.evolution_home.hover_ms, 400);
         assert_eq!(restored.evolution_home.card(), prefs.evolution_home.card());
     }
 }
@@ -1248,11 +1254,18 @@ fn p03_wheel_retargets_expansion_and_viewport_before_the_previous_tween_finishes
 }
 
 #[test]
-fn p03_wheel_is_ignored_in_menu_dialog_settings_and_move() {
+fn p03_home_wheel_stays_isolated_from_local_contexts_and_move() {
     let mut state = preview();
     state.preferences.evolution_home.wheel_steps = serde_json::from_value(json!(2)).unwrap();
     let dock = state.focus.clone();
     let now = Instant::now();
+    let visible = |target: Target| {
+        [crate::state::Control {
+            target,
+            rect: crate::state::Rect::default(),
+            scrollable: false,
+        }]
+    };
     state.evolution_wheel(1, now);
     // The Home preview has no side-menu entry point. Exercise a covered Home surface directly.
     let menu = Target::Nav(0);
@@ -1260,7 +1273,7 @@ fn p03_wheel_is_ignored_in_menu_dialog_settings_and_move() {
         restore: dock.clone(),
     });
     state.focus = menu.clone();
-    assert!(!state.wheel_scroll(&[], None, 0, 100));
+    assert!(state.wheel_scroll(&visible(menu.clone()), None, 0, 100));
     assert_eq!(state.focus, menu);
     state.back();
     assert_eq!(state.focus, dock);
@@ -1270,7 +1283,7 @@ fn p03_wheel_is_ignored_in_menu_dialog_settings_and_move() {
     state.options();
     let option = state.focus.clone();
     assert!(state.overlay.is_some());
-    assert!(!state.wheel_scroll(&[], None, 0, 100));
+    assert!(state.wheel_scroll(&visible(option.clone()), None, 0, 100));
     assert_eq!(state.focus, option);
     state.back();
     state.evolution_start_move(dock.clone());
@@ -1280,7 +1293,7 @@ fn p03_wheel_is_ignored_in_menu_dialog_settings_and_move() {
 
     state.open(2);
     let setting = state.focus.clone();
-    assert!(!state.wheel_scroll(&[], None, 0, 100));
+    assert!(state.wheel_scroll(&visible(setting.clone()), None, 0, 100));
     assert_eq!(state.page, Page::Settings);
     assert_eq!(state.focus, setting);
 }
@@ -1443,7 +1456,8 @@ fn dock_scale_changes_only_the_cinema_context_and_preserves_the_dock_window() {
 
 #[test]
 fn dock_settings_stage_apply_cancel_and_confirm_restore() {
-    use crate::home_evolution::{DockHorizontal, DockScale};
+    use crate::home_evolution::DockScale;
+    use crate::home_visual::{Category, Edit, Field, VisualPreferences};
     use crate::state::{DOCK_ROW, Subpage};
     let mut state = preview();
     let saved = DockScale::default();
@@ -1457,25 +1471,21 @@ fn dock_settings_stage_apply_cancel_and_confirm_restore() {
     state.focus = Target::Setting(DOCK_ROW);
     assert!(state.activate().is_empty());
     state.direction(Direction::Right, &[]);
+    let mut draft = VisualPreferences::saved(&state.preferences);
+    draft.adjust(Field::DockScale, true);
     assert_eq!(
         state.subpage,
-        Some(Subpage::Dock {
-            scale: edited,
-            horizontal: DockHorizontal::Sequential,
-            confirming_restore: false
-        })
+        Some(Subpage::Visual(Edit {
+            category: Category::Dock,
+            draft,
+            prompt: None
+        }))
     );
     assert_eq!(state.preferences.evolution_home.cinema_dock_scale, saved);
     state.focus = Target::DockApply;
-    assert_eq!(
-        state.activate(),
-        vec![Effect::SaveDockSettings {
-            scale: edited,
-            horizontal: DockHorizontal::Sequential
-        }]
-    );
+    assert_eq!(state.activate(), vec![Effect::SaveVisual(draft)]);
     assert_eq!(state.preferences.evolution_home.cinema_dock_scale, saved);
-    state.dock_settings_saved(edited, DockHorizontal::Sequential);
+    state.visual_saved(draft);
     assert_eq!(state.focus, Target::Setting(DOCK_ROW));
     state.activate();
     state.focus = Target::DockRestore;
@@ -1486,19 +1496,331 @@ fn dock_settings_stage_apply_cancel_and_confirm_restore() {
     state.activate();
     state.focus = Target::DockConfirmRestore;
     assert!(state.activate().is_empty());
+    draft.restore(Category::Dock);
     assert_eq!(
         state.subpage,
-        Some(Subpage::Dock {
-            scale: saved,
-            horizontal: DockHorizontal::Sequential,
-            confirming_restore: false
-        })
+        Some(Subpage::Visual(Edit {
+            category: Category::Dock,
+            draft,
+            prompt: None
+        }))
     );
     assert_eq!(state.preferences.evolution_home.cinema_dock_scale, edited);
     state.focus = Target::DockCancel;
     assert!(state.activate().is_empty());
     assert_eq!(state.focus, Target::Setting(DOCK_ROW));
     assert_eq!(state.preferences.evolution_home.cinema_dock_scale, edited);
+}
+
+#[test]
+fn p06_visual_controls_match_saved_preferences_and_defaults() {
+    use crate::home_visual::{Category, Field, VisualPreferences};
+    let mut original = Preferences::default();
+    original.favorites = Some(vec!["com.example.favorite".into()]);
+    original.greeting_name = "Ana".into();
+    original.homebrew_updates = true;
+    original.evolution_home.hold_ms = 1500;
+    original.evolution_home.global_slots = [6, 1];
+    let defaults = VisualPreferences::saved(&original);
+    let mut draft = defaults;
+    let categories = [
+        Category::Dock,
+        Category::Cinema,
+        Category::Layout,
+        Category::Shortcuts,
+        Category::Animations,
+    ];
+    for category in categories {
+        for field in category.fields() {
+            let mut edited = defaults;
+            for right in [false, true] {
+                edited.adjust(*field, right);
+            }
+            // Some steppers start in the middle and return there after a left/right pair.
+            if edited == defaults {
+                edited.adjust(*field, false);
+            }
+            assert_ne!(edited, defaults, "{field:?}");
+            assert_ne!(
+                edited.label(*field, Language::En),
+                defaults.label(*field, Language::En),
+                "{field:?}"
+            );
+            edited.restore(category);
+            assert_eq!(edited, defaults, "{field:?}");
+            draft.adjust(*field, false);
+        }
+    }
+    draft.adjust(Field::MotionSpeed, true);
+    draft.apply(&mut original);
+    assert_ne!(VisualPreferences::saved(&original), defaults);
+    draft.restore(Category::All);
+    draft.apply(&mut original);
+    assert_eq!(VisualPreferences::saved(&original), defaults);
+    assert_eq!(original.greeting_name, "Ana");
+    assert_eq!(original.favorites.unwrap(), ["com.example.favorite"]);
+    assert!(original.homebrew_updates);
+    assert_eq!(original.evolution_home.hold_ms, 1500);
+    assert_eq!(original.evolution_home.global_slots, [6, 1]);
+}
+
+#[test]
+fn p06_dock_back_continue_discard_and_clean_exit() {
+    use crate::home_visual::{Action, Category, Edit, Prompt, VisualPreferences};
+    use crate::state::{DOCK_ROW, Subpage};
+    let mut state = preview();
+    state.open(2);
+    for changed in [false, true] {
+        state.focus = Target::Setting(DOCK_ROW);
+        assert!(state.activate().is_empty());
+        if changed {
+            state.direction(Direction::Right, &[]);
+            let draft = state.subpage.clone();
+            state.pointer_focus(Target::Sidebar(1));
+            assert_eq!(state.subpage, draft);
+            assert_eq!(state.section, 0);
+        }
+        assert!(state.back().is_empty());
+        if !changed {
+            assert_eq!(state.subpage, None);
+            continue;
+        }
+        assert!(matches!(
+            state.subpage,
+            Some(Subpage::Visual(Edit {
+                prompt: Some(Prompt::Unsaved),
+                ..
+            }))
+        ));
+        assert_eq!(state.focus, Category::Dock.action(Action::Continue));
+        assert!(state.activate().is_empty());
+        assert_eq!(state.focus, Target::DockScale);
+        state.back();
+        state.focus = Category::Dock.action(Action::Apply);
+        assert!(matches!(
+            state.activate().as_slice(),
+            [Effect::SaveVisual(_)]
+        ));
+        state.focus = Category::Dock.action(Action::Discard);
+        assert!(state.activate().is_empty());
+        assert_eq!(state.subpage, None);
+        assert_eq!(
+            VisualPreferences::saved(&state.preferences),
+            VisualPreferences::saved(&Preferences::default())
+        );
+    }
+}
+
+#[test]
+fn p06_visibility_applies_with_the_same_logical_dock_focus() {
+    use crate::home_visual::{Action, Field};
+    use crate::state::LAYOUT_ROW;
+    let mut state = preview();
+    let original_focus = state.focus.clone();
+    let favorites = state.preferences.favorites.clone();
+    state.open(2);
+    state.focus = Target::Setting(LAYOUT_ROW);
+    state.activate();
+    for field in [Field::WidgetsVisible, Field::CinemaVisible] {
+        state.focus = field.step_target(false);
+        assert!(state.activate().is_empty());
+    }
+    assert!(state.preferences.evolution_home.show_center);
+    state.focus = Target::VisualAction(Action::Apply);
+    let [Effect::SaveVisual(draft)] = state.activate()[..] else {
+        panic!("expected staged save")
+    };
+    state.visual_saved(draft);
+    state.open(0);
+    assert_eq!(state.focus, original_focus);
+    assert_eq!(state.preferences.favorites, favorites);
+    assert_eq!(state.evolution_top_targets().len(), 2);
+    assert_eq!(state.evolution_geometry().cinema_card_height, 0.);
+    assert!(!state.evolution_widget_eligible(WidgetApp::Weather));
+}
+
+#[test]
+fn p07_dock_100_percent_fits_the_66_pixel_field_between_arrows() {
+    let mut state = preview();
+    state.open(2);
+    state.focus = Target::Setting(crate::state::DOCK_ROW);
+    state.activate();
+    for _ in 0..12 {
+        state.direction(Direction::Right, &[]);
+    }
+    let scene = scene(&state);
+    let value = scene
+        .draw
+        .iter()
+        .find_map(|draw| match draw {
+            crate::renderer::Draw::Text(value, rect, _, _, _) if value == "100%" => Some(rect),
+            _ => None,
+        })
+        .unwrap();
+    let left = scene
+        .controls
+        .iter()
+        .find(|control| control.target == Target::DockScaleStep(false))
+        .unwrap()
+        .rect;
+    let right = scene
+        .controls
+        .iter()
+        .find(|control| control.target == Target::DockScaleStep(true))
+        .unwrap()
+        .rect;
+    assert_eq!(value.w, 66.);
+    assert_eq!(value.x, left.x + left.w);
+    assert_eq!(value.x + value.w, right.x);
+}
+
+#[test]
+fn p06_motion_catalog_speed_and_accessibility() {
+    use crate::home_motion::{Motion, MotionCurve, MotionPart, MotionProfile, MotionSpeed};
+    let parts = [
+        MotionPart::Focus,
+        MotionPart::Carousel,
+        MotionPart::Expand,
+        MotionPart::Collapse,
+        MotionPart::Backdrop,
+    ];
+    let mut speed = MotionSpeed::default();
+    for _ in 0..20 {
+        speed = speed.stepped(false);
+    }
+    assert_eq!(speed.percent(), 50);
+    for percent in (50..=150).step_by(10) {
+        assert_eq!(speed.percent(), percent);
+        for profile in MotionProfile::ALL {
+            let motion = Motion {
+                profile,
+                curve: MotionCurve::Elastic,
+                speed,
+            };
+            for (part, base) in parts.into_iter().zip([180., 200., 320., 300., 350.]) {
+                let duration = motion.duration(part);
+                let balanced = base / (10. * f32::from(percent));
+                match profile {
+                    MotionProfile::Balanced => assert_eq!(duration, balanced),
+                    MotionProfile::Agile => {
+                        assert!((duration - balanced * 0.75).abs() < f32::EPSILON)
+                    }
+                    MotionProfile::Cinematic => {
+                        assert!((duration - balanced * 1.25).abs() < f32::EPSILON)
+                    }
+                    MotionProfile::Reduced if matches!(part, MotionPart::Backdrop) => {
+                        assert_eq!(duration, 0.120)
+                    }
+                    _ => assert_eq!(duration, 0.),
+                }
+                let samples: Vec<_> = (0..=100)
+                    .map(|i| motion.progress(part, duration * i as f32 / 100.))
+                    .collect();
+                if profile.geometric() && !matches!(part, MotionPart::Backdrop) {
+                    assert!((samples[75] - 1.03).abs() < 1e-5);
+                    assert!(samples[..75].windows(2).all(|pair| pair[0] <= pair[1]));
+                    assert!(samples[75..].windows(2).all(|pair| pair[0] >= pair[1]));
+                } else {
+                    assert!(samples.iter().all(|value| *value <= 1.));
+                }
+            }
+        }
+        speed = speed.stepped(true);
+    }
+    assert_eq!(speed.percent(), 150);
+}
+
+#[test]
+fn p06_reduced_snaps_geometry_while_backdrop_fades_and_none_is_instant() {
+    use crate::home_motion::{MotionCurve, MotionProfile};
+    for profile in [MotionProfile::Reduced, MotionProfile::None] {
+        let mut state = preview();
+        state.preferences.evolution_home.motion_profile = profile;
+        state.preferences.evolution_home.motion_curve = MotionCurve::Elastic;
+        let home = state.evolution.as_mut().unwrap();
+        home.expanded = true;
+        home.first = 2;
+        let now = Instant::now();
+        state.evolution_tick_at(0.060, now);
+        let home = state.evolution.as_ref().unwrap();
+        assert_eq!(home.expansion.value, 1.);
+        assert_eq!(home.carousel.value, 2.);
+        assert_eq!(
+            home.cinema_opacity.value,
+            if profile == MotionProfile::Reduced {
+                0.5
+            } else {
+                1.
+            }
+        );
+        state.evolution_tick_at(0.060, now + Duration::from_millis(60));
+        assert_eq!(state.evolution.as_ref().unwrap().cinema_opacity.value, 1.);
+    }
+}
+
+#[test]
+fn p06_motion_sample_restarts_in_place_and_finishes() {
+    use crate::state::ANIMATIONS_ROW;
+    let mut state = preview();
+    let saved = serde_json::to_value(&state.preferences).unwrap();
+    state.open(2);
+    state.focus = Target::Setting(ANIMATIONS_ROW);
+    assert!(state.activate().is_empty());
+    assert!(state.motion_sample.is_none());
+    let old = Instant::now() - Duration::from_millis(500);
+    state.motion_sample = Some(old);
+    for _ in 0..3 {
+        state.direction(Direction::Right, &[]);
+        assert!(state.motion_sample.unwrap() > old);
+        state.direction(Direction::Down, &[]);
+    }
+    assert_eq!(serde_json::to_value(&state.preferences).unwrap(), saved);
+    state.motion_sample = Some(Instant::now() - crate::home_motion::Motion::SAMPLE);
+    state.tick();
+    assert!(state.motion_sample.is_none());
+    assert_eq!(state.evolution.as_ref().unwrap().selected, 0);
+}
+
+#[test]
+fn p06_rotation_catalog_pause_and_title_count() {
+    use crate::home_evolution::Rotation;
+    use crate::home_visual::{Field, ROTATIONS, VisualPreferences};
+    let mut preferences = Preferences::default();
+    let mut draft = VisualPreferences::saved(&preferences);
+    draft.adjust(Field::CinemaRotation, false);
+    draft.adjust(Field::CinemaRotation, false);
+    for interval in ROTATIONS {
+        draft.apply(&mut preferences);
+        let p = &preferences.evolution_home;
+        assert_eq!(p.rotation_enabled.then_some(p.rotation_seconds), interval);
+        if let Some(seconds) = interval {
+            let mut rotation = Rotation::default();
+            let now = Instant::now();
+            let period = Duration::from_secs(seconds);
+            assert!(!rotation.tick(now, true, seconds, 0));
+            assert!(!rotation.tick(now + period, false, seconds, 0));
+            assert!(!rotation.tick(now + period * 2, true, seconds, 0));
+            assert!(!rotation.tick(
+                now + period * 3 - Duration::from_millis(1),
+                true,
+                seconds,
+                0
+            ));
+            assert!(rotation.tick(now + period * 3, true, seconds, 0));
+        }
+        draft.adjust(Field::CinemaRotation, true);
+    }
+    for count in [0, 1, 2, 8] {
+        let mut state = preview();
+        state.evolution.as_mut().unwrap().catalog_len = Some(count);
+        let now = Instant::now();
+        state.evolution_tick_at(0.1, now);
+        state.evolution_tick_at(0.1, now + Duration::from_secs(10));
+        let home = state.evolution.as_ref().unwrap();
+        assert_eq!(home.rotation.advances, u64::from(count > 1));
+        assert_eq!(home.title_index(i64::try_from(count).unwrap()), 0);
+        assert_eq!(state.evolution_has_cinema(), count != 0);
+    }
 }
 
 #[test]

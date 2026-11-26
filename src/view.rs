@@ -4,9 +4,9 @@ use crate::{
     model::{App, BACKGROUNDS, CATEGORIES, Input, InputMode, UiSize},
     renderer::{Color, Draw, TextStyle, WHITE},
     state::{
-        APPS_COLUMNS, CinemaScalePrompt, Control, HOME_FADE_LEFT, HOME_FADE_RIGHT, HOME_STRIP_LEFT,
-        HOME_STRIP_RIGHT, HOME_TILE_PITCH, HOME_TILE_WIDTH, HOMEBREW_UPDATES_ROW, KEYS, Overlay,
-        Page, Rect, SYSTEM_SECTION, State, Subpage, Target, TextField, WIDGETS_SECTION,
+        APPS_COLUMNS, Control, HOME_FADE_LEFT, HOME_FADE_RIGHT, HOME_STRIP_LEFT, HOME_STRIP_RIGHT,
+        HOME_TILE_PITCH, HOME_TILE_WIDTH, HOMEBREW_UPDATES_ROW, KEYS, Overlay, Page, Rect,
+        SYSTEM_SECTION, State, Subpage, Target, TextField, WIDGETS_SECTION,
     },
     weather::{self, Unit},
 };
@@ -252,6 +252,8 @@ pub struct Scene {
     pub wallpaper_fade: Option<f32>,
     /// One lap of the Today card's price ticker in pixels; 0 when its coins stand still.
     pub ticker: f32,
+    pub today_scroll_max: f32,
+    pub motion_sample_active: bool,
 }
 
 /// The wallpapers a scene lies on while one fades into the next: both, or either end alone.
@@ -297,6 +299,8 @@ impl Scene {
             ground: 0,
             wallpaper_fade: None,
             ticker: 0.,
+            today_scroll_max: 0.,
+            motion_sample_active: false,
         }
     }
     fn shape(&mut self, rect: Rect, radius: f32, fill: Color) {
@@ -1193,6 +1197,14 @@ const MENU_ITEM: f32 = 76.;
 const MENU_PITCH: f32 = 84.;
 const MENU_INPUT: f32 = 64.;
 const MENU_INPUT_PITCH: f32 = 68.;
+const MENU_INPUT_TOP: f32 = MENU_PANEL.y + 118. + 3. * MENU_PITCH;
+const MENU_INPUT_BOTTOM: f32 = MENU_PANEL.y + MENU_PANEL.h - 40. - MENU_ITEM - MENU_PITCH - 8.;
+pub(crate) const MENU_INPUT_VIEWPORT: Rect = Rect::new(
+    0.,
+    MENU_INPUT_TOP,
+    MENU_PANEL.x + MENU_PANEL.w,
+    MENU_INPUT_BOTTOM - MENU_INPUT_TOP,
+);
 /// The strip the panel and its shadow cross. The menu is drawn clipped to it, so its labels,
 /// which would otherwise count as changed across the screen's full width, stay inside it.
 const MENU_STRIP: Rect = Rect::new(0., 0., MENU_PANEL.x + MENU_PANEL.w + 48., 1080.);
@@ -1277,8 +1289,9 @@ fn menu(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
         ),
         tone,
     );
-    y += MENU_PITCH;
     if state.menu_inputs {
+        out.draw.push(Draw::Clip(Some(MENU_INPUT_VIEWPORT)));
+        y += MENU_PITCH - state.menu_input_scroll;
         for input in state
             .inventory
             .inputs
@@ -1323,10 +1336,11 @@ fn menu(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTime) {
                 false,
             );
             if open {
-                out.control(target, row, false);
+                out.control(target, row, true);
             }
             y += MENU_INPUT_PITCH;
         }
+        out.draw.push(Draw::Clip(Some(MENU_STRIP)));
     }
     let bottom = panel.y + panel.h - 40. - MENU_ITEM;
     menu_item(
@@ -3237,6 +3251,7 @@ fn today_open(
         TODAY_LIST.w,
         tallest.min(TODAY_LIST.h),
     );
+    out.today_scroll_max = (content - list.h).max(0.);
     let foot = TODAY_PANEL.y + TODAY_PANEL.h - (TODAY_LIST.y + TODAY_LIST.h);
     let whole = Rect::new(
         TODAY_PANEL.x,
@@ -3303,6 +3318,9 @@ fn today_open(
             ));
         } else {
             out.shape(pill, 24., c(0xffffff, 0.08));
+            if state.focus == Target::TodayTab(*tab) {
+                out.border(pill, 24., 2., WHITE);
+            }
         }
         out.text(
             language.t(tab.key()),
@@ -6339,7 +6357,7 @@ fn preview_frame(out: &mut Scene, state: &State) {
     out.border(PREVIEW, 18., 1., c(0xffffff, 0.14));
     if matches!(
         state.subpage,
-        Some(Subpage::Dock { .. } | Subpage::Cinema { .. } | Subpage::Wheel { .. })
+        Some(Subpage::Visual(_) | Subpage::Wheel { .. })
     ) {
         return;
     }
@@ -6353,6 +6371,162 @@ fn preview_frame(out: &mut Scene, state: &State) {
 }
 
 /// The part of Home the focused setting, or the open subpage, changes.
+fn motion_sample(
+    out: &mut Scene,
+    assets: &Assets,
+    motion: crate::home_motion::Motion,
+    started: Option<std::time::Instant>,
+) -> bool {
+    use crate::home_motion::{Motion, MotionPart, MotionProfile};
+    let elapsed = started
+        .map(|start| start.elapsed())
+        .filter(|age| *age < Motion::SAMPLE);
+    let age = elapsed.map_or(0., |age| age.as_secs_f32());
+    let active = elapsed.is_some();
+    let second = age >= 0.48;
+    let closing = age >= 1.13;
+    let expansion = if !active {
+        0.
+    } else if closing {
+        1. - motion.progress(MotionPart::Collapse, age - 1.13)
+    } else {
+        motion.progress(MotionPart::Expand, age)
+    };
+    let slide = if second {
+        motion.progress(MotionPart::Carousel, age - 0.48)
+    } else {
+        0.
+    };
+    let opacity = if !active {
+        0.
+    } else if closing {
+        1. - motion.progress(MotionPart::Backdrop, age - 1.13)
+    } else {
+        motion.progress(MotionPart::Backdrop, age)
+    };
+    let size = PREVIEW.w / 1920.;
+    let place = |x, y, w, h| {
+        Rect::new(
+            PREVIEW.x + x * size,
+            PREVIEW.y + y * size,
+            w * size,
+            h * size,
+        )
+    };
+    let wallpaper = |name: &str| assets.path(format!("wallpapers/{name}-plain.jpg"));
+    let thumbnail = |name: &str| assets.path(format!("thumbnails/{name}.jpg"));
+    out.draw.push(Draw::Clip(Some(PREVIEW)));
+    out.image(wallpaper("forest"), PREVIEW, 0., false);
+    out.shape(PREVIEW, 0., c(0x090e19, 0.4));
+    for (x, y, w, h) in [
+        (85., 130., 185., 23.),
+        (85., 170., 294., 13.),
+        (1560., 144., 275., 19.),
+    ] {
+        out.shape(place(x, y, w, h), 4., c(0xf1f3fb, 0.72));
+    }
+    for (x, icon) in [(1680., "grid"), (1775., "evolution-settings")] {
+        out.icon(assets, icon, place(x, 38., 46., 46.), WHITE);
+    }
+    let backdrop = place(76., 265. - 35. * expansion, 1768., 350. + 175. * expansion);
+    out.draw.push(Draw::TintedImage(
+        wallpaper("dunes"),
+        backdrop,
+        8.,
+        false,
+        c(0xffffff, opacity.clamp(0., 1.) * 0.82),
+    ));
+    out.draw.push(Draw::RoundedGradient(
+        backdrop,
+        8.,
+        c(0x080d17, 0.13),
+        c(0x080d17, 0.79),
+    ));
+    let row = place(111., 422., 1698., 320.);
+    out.draw.push(Draw::Clip(Some(row)));
+    let card_width = 270. + 22. * expansion;
+    let card_y = 450. + 100. * expansion;
+    let focus = if active && !closing {
+        motion.progress(MotionPart::Focus, if second { age - 0.48 } else { age })
+    } else {
+        0.
+    };
+    let highlight = if motion.profile == MotionProfile::Reduced && active && !closing {
+        motion.progress(MotionPart::Backdrop, if second { age - 0.48 } else { age })
+    } else {
+        focus
+    };
+    for (index, art) in [
+        "dunes",
+        "summit",
+        "yosemite",
+        "san-francisco",
+        "forest",
+        "northern-lights",
+        "dunes",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let is_focus = index == if second { 2 } else { 0 };
+        let grow = if is_focus && motion.profile.geometric() {
+            13. * focus
+        } else {
+            0.
+        };
+        let x = 120. + (index as f32 - slide) * (card_width + 16.);
+        let card = place(
+            x - grow / 2.,
+            card_y - grow / 2.,
+            card_width + grow,
+            card_width * 9. / 16. + grow,
+        );
+        out.image(thumbnail(art), card, 5., false);
+        if is_focus && highlight > 0. {
+            out.border(
+                card.inset(-2.),
+                5.,
+                2.,
+                c(0xecf6ff, highlight.clamp(0., 1.)),
+            );
+        }
+    }
+    out.draw.push(Draw::Clip(Some(PREVIEW)));
+    let width = 220. - 78. * expansion;
+    let height = width * 0.625;
+    let dock_width = width * 6. + 90.;
+    let left = (1920. - dock_width) / 2.;
+    out.shape(
+        place(
+            left - 23.,
+            985. - height - 28.,
+            dock_width + 46.,
+            height + 50.,
+        ),
+        8.,
+        c(0x0a1423, 0.78),
+    );
+    for (index, color) in [0x364b78, 0x823e56, 0x47694c, 0x755d44, 0x394a5a, 0x534974]
+        .into_iter()
+        .enumerate()
+    {
+        let x = left + index as f32 * (width + 18.);
+        out.shape(place(x, 985. - height, width, height), 5., c(color, 1.));
+        out.shape(
+            place(
+                x + width * 0.35,
+                985. - height * 0.62,
+                width * 0.30,
+                height * 0.24,
+            ),
+            3.,
+            c(0xffffff, 0.67),
+        );
+    }
+    out.draw.push(Draw::Clip(None));
+    active
+}
+
 fn preview_region(state: &State) -> Option<Region> {
     if let Some(subpage) = &state.subpage {
         return match subpage {
@@ -6393,6 +6567,20 @@ pub fn home_preview(scene: &mut Scene, state: &mut State, assets: &Assets, now: 
     let Some(slot) = scene.preview.take() else {
         return;
     };
+    if let Some(Subpage::Visual(edit)) = state.subpage
+        && edit.category == crate::home_visual::Category::Animations
+    {
+        let mut sample = Scene::new();
+        scene.motion_sample_active = motion_sample(
+            &mut sample,
+            assets,
+            edit.draft.motion(),
+            state.motion_sample,
+        );
+        sample.fade(0, 1., sidebar_dim(state));
+        scene.draw.splice(slot.at..slot.at, sample.draw);
+        return;
+    }
     let dim = sidebar_dim(state);
     let saved = (
         std::mem::replace(&mut state.page, Page::Home),
@@ -6408,43 +6596,47 @@ pub fn home_preview(scene: &mut Scene, state: &mut State, assets: &Assets, now: 
         state.pressed.take(),
         state.moving.take(),
     );
-    let dock_preview = match (&state.subpage, &mut state.evolution) {
-        (Some(Subpage::Dock { scale, .. }), Some(home)) => Some((
-            std::mem::replace(
-                &mut state.preferences.evolution_home.cinema_dock_scale,
-                *scale,
-            ),
-            std::mem::replace(&mut home.expansion.value, 1.),
-            std::mem::replace(&mut home.top_expansion.value, 0.),
-            std::mem::replace(&mut home.inputs_revealed, false),
-        )),
+    let draft = match state.subpage {
+        Some(Subpage::Visual(edit)) => Some(edit),
         _ => None,
     };
-    let cinema_preview = match (&state.subpage, &mut state.evolution) {
-        (Some(Subpage::Cinema { scale, .. }), Some(home)) => Some((
-            home.cinema_scale_override.replace(*scale),
-            std::mem::replace(&mut home.expansion.value, 0.),
-            std::mem::replace(&mut home.top_expansion.value, 0.),
-            std::mem::replace(&mut home.inputs_revealed, false),
-        )),
-        _ => None,
-    };
+    let saved_visual = draft.map(|edit| {
+        let original = crate::home_visual::VisualPreferences::saved(&state.preferences);
+        edit.draft.apply(&mut state.preferences);
+        original
+    });
+    let expanded = draft.is_some_and(|edit| edit.category == crate::home_visual::Category::Dock);
+    let geometry = draft.and_then(|_| {
+        state.evolution.as_mut().map(|home| {
+            (
+                std::mem::replace(
+                    &mut home.expansion.value,
+                    if expanded && state.preferences.evolution_home.show_center {
+                        1.
+                    } else {
+                        0.
+                    },
+                ),
+                std::mem::replace(&mut home.top_expansion.value, 0.),
+                std::mem::replace(
+                    &mut home.cinema_opacity.value,
+                    if expanded { 1. } else { 0. },
+                ),
+                std::mem::replace(&mut home.inputs_revealed, false),
+            )
+        })
+    });
     let home = self::scene(state, assets, now);
-    if let (Some(home), Some(saved)) = (&mut state.evolution, dock_preview) {
-        (
-            state.preferences.evolution_home.cinema_dock_scale,
-            home.expansion.value,
-            home.top_expansion.value,
-            home.inputs_revealed,
-        ) = saved;
+    if let Some(original) = saved_visual {
+        original.apply(&mut state.preferences);
     }
-    if let (Some(home), Some(saved)) = (&mut state.evolution, cinema_preview) {
+    if let (Some(home), Some(values)) = (&mut state.evolution, geometry) {
         (
-            home.cinema_scale_override,
             home.expansion.value,
             home.top_expansion.value,
+            home.cinema_opacity.value,
             home.inputs_revealed,
-        ) = saved;
+        ) = values;
     }
     (
         state.page,
@@ -6608,6 +6800,18 @@ fn breadcrumb(state: &State) -> Vec<&str> {
                 language.t("evolutionWheel"),
             ]);
         }
+        Some(Subpage::PanelFocus) => {
+            path.extend([
+                language.t("evolutionNavigation"),
+                language.t("evolutionPanelFocus"),
+            ]);
+        }
+        Some(Subpage::MagicRemote { .. }) => {
+            path.extend([
+                language.t("magicRemoteInterface"),
+                language.t("magicRemote"),
+            ]);
+        }
         Some(subpage) => path.push(match subpage {
             Subpage::AppNames => language.t("appNames"),
             Subpage::Greeting => language.t("greeting"),
@@ -6623,8 +6827,7 @@ fn breadcrumb(state: &State) -> Vec<&str> {
             Subpage::Language => language.t("language"),
             Subpage::Appearance => language.t("uiScale"),
             Subpage::Navigation => language.t("evolutionNavigation"),
-            Subpage::Dock { .. } => language.t("evolutionDock"),
-            Subpage::Cinema { .. } => language.t("evolutionCinema"),
+            Subpage::Visual(edit) => language.t(edit.category.key()),
             Subpage::About => language.t("evolutionAbout"),
             Subpage::TextRendering => language.t("textRendering"),
             Subpage::HomeTakeover => language.t("homeTakeover"),
@@ -6754,100 +6957,42 @@ fn settings_sidebar(out: &mut Scene, state: &State, assets: &Assets) {
     }
 }
 
-fn dock_settings(
+fn visual_settings(
     out: &mut Scene,
     state: &State,
     assets: &Assets,
-    scale: crate::home_evolution::DockScale,
-    horizontal: crate::home_evolution::DockHorizontal,
-    confirming_restore: bool,
+    edit: crate::home_visual::Edit,
 ) {
-    let normal = [
-        (Target::DockScale, "evolutionDockScale"),
-        (Target::DockHorizontal, "evolutionDockHorizontal"),
-        (Target::DockApply, "evolutionApply"),
-        (Target::DockRestore, "evolutionRestoreDefaults"),
-        (Target::DockCancel, "cancel"),
-    ];
-    let confirmation = [
-        (Target::DockConfirmRestore, "evolutionRestoreDefaults"),
-        (Target::DockCancel, "cancel"),
-    ];
-    settings_steppers(
-        out,
-        state,
-        assets,
-        if confirming_restore {
-            &confirmation
-        } else {
-            &normal
-        },
-        confirming_restore.then_some("evolutionDockRestorePrompt"),
-        &[
-            SettingStepper {
-                target: Target::DockScale,
-                step: Target::DockScaleStep,
-                label: &scale.label(),
-            },
-            SettingStepper {
-                target: Target::DockHorizontal,
-                step: Target::DockHorizontalStep,
-                label: state.preferences.language.t(horizontal.label()),
-            },
-        ],
-    );
-}
-
-fn cinema_settings(
-    out: &mut Scene,
-    state: &State,
-    assets: &Assets,
-    scale: crate::home_evolution::CinemaScale,
-    prompt: Option<CinemaScalePrompt>,
-) {
-    let (rows, prompt_key): (&[_], _) = match prompt {
-        None => (
-            &[
-                (Target::CinemaScale, "evolutionCinemaScale"),
-                (Target::CinemaApply, "evolutionApply"),
-                (Target::CinemaRestore, "evolutionRestoreDefaults"),
-                (Target::CinemaCancel, "cancel"),
-            ],
-            None,
-        ),
-        Some(CinemaScalePrompt::Restore) => (
-            &[
-                (Target::CinemaConfirmRestore, "evolutionRestoreDefaults"),
-                (Target::CinemaCancel, "cancel"),
-            ],
-            Some("evolutionCinemaRestorePrompt"),
-        ),
-        Some(CinemaScalePrompt::Unsaved) => (
-            &[
-                (Target::CinemaApply, "evolutionApply"),
-                (Target::CinemaDiscard, "evolutionDiscard"),
-                (Target::CinemaContinue, "evolutionContinueEditing"),
-            ],
-            Some("evolutionCinemaUnsavedPrompt"),
-        ),
+    use crate::home_visual::{Category, Prompt};
+    let prompt = match edit.prompt {
+        Some(Prompt::Restore) => Some(edit.category.restore_prompt()),
+        Some(Prompt::Unsaved) => Some("evolutionVisualUnsaved"),
+        None if edit.category == Category::All => Some("evolutionRestoreAllReady"),
+        None => None,
     };
-    settings_steppers(
-        out,
-        state,
-        assets,
-        rows,
-        prompt_key,
-        &[SettingStepper {
-            target: Target::CinemaScale,
-            step: Target::CinemaScaleStep,
-            label: &scale.label(),
-        }],
-    );
+    let values = edit
+        .category
+        .fields()
+        .iter()
+        .map(|field| edit.draft.label(*field, state.preferences.language))
+        .collect::<Vec<_>>();
+    let steppers = edit
+        .category
+        .fields()
+        .iter()
+        .zip(&values)
+        .map(|(field, value)| SettingStepper {
+            target: field.target(),
+            step: [field.step_target(false), field.step_target(true)],
+            label: value,
+        })
+        .collect::<Vec<_>>();
+    settings_steppers(out, state, assets, &edit.rows(), prompt, &steppers);
 }
 
 struct SettingStepper<'a> {
     target: Target,
-    step: fn(bool) -> Target,
+    step: [Target; 2],
     label: &'a str,
 }
 
@@ -6873,6 +7018,16 @@ fn settings_steppers(
     }
     for &(ref target, key) in rows {
         let rect = Rect::new(LIST_X, y, LIST_WIDTH, ROW_HEIGHT);
+        let value = match (target, &state.subpage) {
+            (Target::RemoteExpansion, Some(Subpage::MagicRemote { draft, .. })) => {
+                Some(language.t(if draft.pointer_expands {
+                    "stateOn"
+                } else {
+                    "stateOff"
+                }))
+            }
+            _ => None,
+        };
         row(
             out,
             state,
@@ -6882,7 +7037,7 @@ fn settings_steppers(
                 rect,
                 title: language.t(key),
                 icon: None,
-                value: None,
+                value,
                 description: None,
                 selected: false,
                 chevron: false,
@@ -6899,6 +7054,8 @@ fn settings_steppers(
                 // Keep the full gap between the step buttons for 100%.
                 Target::DockScale => (163., 121., 66.),
                 Target::DockHorizontal => (295., 251., 196.),
+                Target::RemoteTiming(_) => (194., 148., 93.),
+                Target::VisualField(_) => (269., 224., 168.),
                 _ => (163., 119., 60.),
             };
             let value_rect = Rect::new(right - value_x, rect.y + 20., value_width, 29.);
@@ -6914,7 +7071,7 @@ fn settings_steppers(
                 (true, right - 55., "right"),
             ] {
                 let arrow = Rect::new(left, rect.y + 12., 42., 44.);
-                let target = (stepper.step)(increase);
+                let target = stepper.step[usize::from(increase)].clone();
                 if *state.page_focus() == target {
                     out.shape(arrow, 8., c(0xffffff, 0.20));
                 }
@@ -6936,17 +7093,71 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
     let s = state.scroll;
     if let Some(subpage) = &state.subpage {
         let start = out.draw.len();
-        if let Subpage::Dock {
-            scale,
-            horizontal,
-            confirming_restore,
+        if let Subpage::MagicRemote {
+            draft,
+            confirming_exit,
         } = *subpage
         {
-            dock_settings(out, state, assets, scale, horizontal, confirming_restore);
+            use crate::magic_remote::Timing;
+            if confirming_exit {
+                settings_steppers(
+                    out,
+                    state,
+                    assets,
+                    &[
+                        (Target::RemoteApply, "evolutionApply"),
+                        (Target::RemoteDiscard, "evolutionDiscard"),
+                        (Target::RemoteContinue, "evolutionContinueEditing"),
+                    ],
+                    Some("magicRemoteUnsaved"),
+                    &[],
+                );
+            } else {
+                settings_steppers(
+                    out,
+                    state,
+                    assets,
+                    &[
+                        (Target::RemoteTiming(Timing::Hold), "magicRemoteHold"),
+                        (Target::RemoteTiming(Timing::Hover), "magicRemoteHover"),
+                        (Target::RemoteTiming(Timing::Leave), "magicRemoteLeave"),
+                        (Target::RemoteExpansion, "magicRemoteExpansion"),
+                        (Target::RemoteApply, "evolutionApply"),
+                        (Target::RemoteCancel, "cancel"),
+                    ],
+                    None,
+                    &[
+                        SettingStepper {
+                            target: Target::RemoteTiming(Timing::Hold),
+                            step: [
+                                Target::RemoteTimingStep(Timing::Hold, false),
+                                Target::RemoteTimingStep(Timing::Hold, true),
+                            ],
+                            label: &format!("{} ms", draft.hold_ms),
+                        },
+                        SettingStepper {
+                            target: Target::RemoteTiming(Timing::Hover),
+                            step: [
+                                Target::RemoteTimingStep(Timing::Hover, false),
+                                Target::RemoteTimingStep(Timing::Hover, true),
+                            ],
+                            label: &format!("{} ms", draft.hover_ms),
+                        },
+                        SettingStepper {
+                            target: Target::RemoteTiming(Timing::Leave),
+                            step: [
+                                Target::RemoteTimingStep(Timing::Leave, false),
+                                Target::RemoteTimingStep(Timing::Leave, true),
+                            ],
+                            label: &format!("{} ms", draft.leave_ms),
+                        },
+                    ],
+                );
+            }
             return;
         }
-        if let Subpage::Cinema { scale, prompt } = *subpage {
-            cinema_settings(out, state, assets, scale, prompt);
+        if let Subpage::Visual(edit) = *subpage {
+            visual_settings(out, state, assets, edit);
             return;
         }
         if let Subpage::Wheel { steps } = *subpage {
@@ -6962,7 +7173,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                 None,
                 &[SettingStepper {
                     target: Target::WheelSteps,
-                    step: Target::WheelStepsStep,
+                    step: [Target::WheelStepsStep(false), Target::WheelStepsStep(true)],
                     label: &steps.value().to_string(),
                 }],
             );
@@ -7038,7 +7249,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
             return;
         }
         let options: Vec<(&str, Option<&str>, bool)> = match subpage {
-            Subpage::Dock { .. } | Subpage::Cinema { .. } | Subpage::Wheel { .. } => {
+            Subpage::Visual(_) | Subpage::Wheel { .. } | Subpage::MagicRemote { .. } => {
                 unreachable!("Scale settings are drawn above the choice list")
             }
             Subpage::About => unreachable!("About is drawn above the choice list"),
@@ -7052,7 +7263,31 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     )
                 })
                 .chain(std::iter::once((language.t("evolutionWheel"), None, false)))
+                .chain(std::iter::once((
+                    language.t("evolutionPanelFocus"),
+                    None,
+                    false,
+                )))
                 .collect(),
+            Subpage::PanelFocus => [
+                (
+                    crate::state::PanelFocusMode::Restore,
+                    "evolutionPanelFocusRestore",
+                ),
+                (
+                    crate::state::PanelFocusMode::First,
+                    "evolutionPanelFocusFirst",
+                ),
+            ]
+            .into_iter()
+            .map(|(mode, key)| {
+                (
+                    language.t(key),
+                    None,
+                    state.preferences.evolution_home.panel_focus == mode,
+                )
+            })
+            .collect(),
             Subpage::LampaFeed => crate::model::LampaFeed::ALL
                 .iter()
                 .map(|feed| {
@@ -7199,7 +7434,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     value: None,
                     description,
                     selected,
-                    chevron: *subpage == Subpage::Navigation && index == 2,
+                    chevron: *subpage == Subpage::Navigation && index >= 2,
                 },
             );
         }
@@ -7230,18 +7465,30 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     Some(language.name()),
                     true,
                 ),
-                (
-                    2,
-                    "reducedMotion",
-                    "reducedMotionAbout",
-                    "motion",
-                    Some(if state.preferences.reduced_motion {
-                        language.t("stateOn")
-                    } else {
-                        language.t("stateOff")
-                    }),
-                    false,
-                ),
+                if state.evolution.is_some() {
+                    let motion = crate::home_motion::Motion::saved(&state.preferences);
+                    (
+                        crate::state::ANIMATIONS_ROW,
+                        "evolutionAnimations",
+                        "",
+                        "motion",
+                        Some(language.t(motion.profile.key())),
+                        true,
+                    )
+                } else {
+                    (
+                        2,
+                        "reducedMotion",
+                        "reducedMotionAbout",
+                        "motion",
+                        Some(language.t(if state.preferences.reduced_motion {
+                            "stateOn"
+                        } else {
+                            "stateOff"
+                        })),
+                        false,
+                    )
+                },
                 (
                     crate::state::FOCUS_GLOW_ROW,
                     "focusGlow",
@@ -7303,6 +7550,20 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                     true,
                 ));
             }
+            if state.evolution.is_some() {
+                use crate::home_visual::Category;
+                for (category, icon) in [(Category::Layout, "grid"), (Category::All, "settings")] {
+                    rows.push((category.row(), category.key(), "", icon, None, true));
+                }
+            }
+            rows.push((
+                crate::state::MAGIC_REMOTE_ROW,
+                "magicRemote",
+                "magicRemoteHint",
+                "settings",
+                None,
+                true,
+            ));
             let rects = list_rects(
                 state,
                 LIST_TOP,
@@ -7322,7 +7583,7 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                         title: language.t(key),
                         icon: Some(icon),
                         value,
-                        description: Some(language.t(about)),
+                        description: (!about.is_empty()).then(|| language.t(about)),
                         selected: false,
                         chevron,
                     },
@@ -8283,7 +8544,17 @@ fn options(out: &mut Scene, state: &State, assets: &Assets, id: &str, anchor: Op
     let panel_start = out.draw.len();
     out.modal = Some(panel);
     out.shadow(panel, 27.2, 120., 25., 0.47);
-    out.modal_glass(panel, 27.2);
+    use crate::home_visual::DockTheme;
+    match state
+        .evolution
+        .as_ref()
+        .filter(|_| !background && !shortcut)
+        .map(|_| state.preferences.evolution_home.dock_theme)
+    {
+        Some(DockTheme::GlassDark) => out.glass_tinted(panel, 18., c(0x080d17, 0.94), 0.10),
+        Some(DockTheme::Minimal) => out.shape(panel, 18., c(0x141820, 0.98)),
+        _ => out.modal_glass(panel, 27.2),
+    }
     for (row, (target, label)) in actions.into_iter().enumerate() {
         let rect = Rect::new(
             panel.x + 16.,
@@ -8355,7 +8626,8 @@ fn options(out: &mut Scene, state: &State, assets: &Assets, id: &str, anchor: Op
     if let Some(opened) = state.panel_started {
         out.fade(
             panel_start,
-            (opened.elapsed().as_secs_f32() / 0.12).min(1.),
+            (opened.elapsed().as_secs_f32() / state.panel_animation_seconds().max(f32::EPSILON))
+                .min(1.),
             1.,
         );
     }

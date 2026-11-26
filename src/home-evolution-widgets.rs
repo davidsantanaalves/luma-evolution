@@ -80,9 +80,19 @@ fn header_geometry_for(state: &State, settled_dock: bool) -> HeaderGeometry {
     let y = actions_bottom + WIDGET_GAP;
     let has_location = state.preferences.weather_location.is_some()
         || home.weather_fixture != WeatherFixture::None;
+    let widgets_layout = state.preferences.evolution_home.widgets_layout;
+    let compact_layout = if widgets_layout == WidgetsLayout::Compact {
+        1. - expanded.clamp(0., 1.)
+    } else {
+        0.
+    };
+    let reduction = compact.max(compact_layout);
     let summary_height =
-        (122. - 68. * compact).max(if state.preferences.show_weather && has_location {
-            83.
+        (122. - 68. * reduction).max(if state.preferences.show_weather && has_location {
+            match state.preferences.evolution_home.weather_details {
+                WeatherDetails::Detailed => 112.,
+                _ => 83.,
+            }
         } else {
             0.
         });
@@ -92,9 +102,17 @@ fn header_geometry_for(state: &State, settled_dock: bool) -> HeaderGeometry {
     } else {
         actions_bottom
     };
+    let grouped = if widgets_layout == WidgetsLayout::Right {
+        1. - expanded.clamp(0., 1.)
+    } else {
+        0.
+    };
+    let clock_width = WIDGET_WIDTH + (390. - WIDGET_WIDTH) * grouped;
+    let weather_width = WIDGET_WIDTH + (432. - WIDGET_WIDTH) * grouped;
+    let clock_left = LEFT + (RIGHT - 882. - LEFT) * grouped;
     HeaderGeometry {
-        clock: Rect::new(LEFT, y, WIDGET_WIDTH, height),
-        weather: Rect::new(RIGHT - WIDGET_WIDTH, y, WIDGET_WIDTH, height),
+        clock: Rect::new(clock_left, y, clock_width, height),
+        weather: Rect::new(RIGHT - weather_width, y, weather_width, height),
         buttons,
         actions_bottom,
         summary_height,
@@ -298,8 +316,13 @@ impl State {
         let strip_padding =
             (bottom - expanded_top - wanted).clamp(MIN_STRIP_PADDING, STRIP_PADDING);
         let compact_top = bottom - wanted - strip_padding;
-        let center_top =
-            (compact_top + (expanded_top - compact_top) * home.expansion.value).max(expanded_top);
+        let center_top = match self.preferences.evolution_home.cinema_layout {
+            CinemaLayout::Hybrid => (compact_top
+                + (expanded_top - compact_top) * home.expansion.value)
+                .max(expanded_top),
+            CinemaLayout::Strip => compact_top.max(expanded_top),
+            CinemaLayout::Spotlight => expanded_top,
+        };
         layout.center = Rect::new(
             LEFT,
             center_top - offset,

@@ -45,6 +45,9 @@ In Settings → Interface → Cinema, preview and save the compact Home's 16:9 c
 It defaults to 100% and accepts 40% to 100% in steps of 10 percentage points. With the widget area
 expanded, Cinema stays compact and uses 50% of the reference size. See the
 [R13 desktop captures](docs/home-stage02-r13-aceite.md).
+Interface also offers Home region visibility, Dock appearance and size, Cinema compositions and
+rotation, and animation profiles with an in-panel sample. Apply saves the previewed changes.
+Restore defaults stages the selected category or all Evolution Home visual preferences for review.
 In the desktop preview, the wheel moves between eligible Home areas. In Settings → Interface →
 Navigation → Magic Remote wheel, choose one, two or three logical wheel steps per area.
 One step is the default.

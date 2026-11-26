@@ -37,6 +37,10 @@ mod glyph_atlas;
 mod gpu_timer;
 mod ground;
 mod home_evolution;
+#[path = "home-motion.rs"]
+mod home_motion;
+#[path = "home-visual.rs"]
+mod home_visual;
 mod homebrew_updates;
 mod i18n;
 #[path = "input-refresh.rs"]
@@ -45,6 +49,8 @@ mod layers;
 mod layout;
 #[cfg(all(feature = "webos", target_os = "linux", target_arch = "arm"))]
 mod luna;
+#[path = "magic-remote.rs"]
+mod magic_remote;
 mod model;
 mod motion;
 mod perf_log;
@@ -77,6 +83,9 @@ mod webhook;
 #[path = "webos-compat.rs"]
 mod webos_compat;
 
+#[cfg(test)]
+#[path = "magic-remote-tests.rs"]
+mod magic_remote_tests;
 #[cfg(test)]
 mod tests;
 
@@ -280,7 +289,78 @@ struct Press {
     target: Target,
     start: Instant,
     held: bool,
-    pointer: bool,
+    key: Option<Keycode>,
+    page: state::Page,
+    section: usize,
+    overlay: Option<std::mem::Discriminant<Overlay>>,
+    subpage: Option<std::mem::Discriminant<state::Subpage>>,
+}
+
+impl Press {
+    fn new(state: &State, key: Option<Keycode>, start: Instant) -> Self {
+        Self {
+            target: state.focus.clone(),
+            start,
+            held: false,
+            key,
+            page: state.page,
+            section: state.section,
+            overlay: state.overlay.as_ref().map(std::mem::discriminant),
+            subpage: state.subpage.as_ref().map(std::mem::discriminant),
+        }
+    }
+
+    fn pointer(&self) -> bool {
+        self.key.is_none()
+    }
+
+    fn matches(&self, state: &State) -> bool {
+        self.target == state.focus
+            && self.page == state.page
+            && self.section == state.section
+            && self.overlay == state.overlay.as_ref().map(std::mem::discriminant)
+            && self.subpage == state.subpage.as_ref().map(std::mem::discriminant)
+    }
+
+    fn hold_if_due(&mut self, state: &mut State, now: Instant) {
+        if self.held
+            || !self.matches(state)
+            || state.overlay.is_some()
+            || state.moving.is_some()
+            || state.evolution_moving()
+        {
+            return;
+        }
+        let ms = match &self.target {
+            Target::App(id) if state.preferences.custom_tile(id).is_some() => 600,
+            Target::App(_) => {
+                magic_remote::Timing::Hold.normalize(state.preferences.evolution_home.hold_ms)
+            }
+            Target::Background(_) | Target::Tile(_) | Target::EvolutionGlobal(_) => 600,
+            _ => return,
+        };
+        if now.duration_since(self.start) >= Duration::from_millis(ms)
+            && (!matches!(self.target, Target::App(_)) || state.app_press_eligible(&self.target))
+        {
+            self.held = true;
+            state.pressed = None;
+            state.hold();
+        }
+    }
+
+    fn release(mut self, state: &mut State, now: Instant) -> Vec<Effect> {
+        if self.held || !self.matches(state) {
+            return vec![];
+        }
+        self.hold_if_due(state, now);
+        if self.held { vec![] } else { state.activate() }
+    }
+}
+
+fn begin_ok(press: &mut Option<Press>, state: &State, key: Keycode, repeat: bool, now: Instant) {
+    if !repeat && press.as_ref().is_none_or(Press::pointer) {
+        *press = Some(Press::new(state, Some(key), now));
+    }
 }
 
 const SCRIPT_POINTER: u32 = u32::MAX - 1;
@@ -415,25 +495,14 @@ fn effects(
 ) -> bool {
     for effect in effects {
         match effect {
-            Effect::SaveDockSettings { scale, horizontal } => {
+            Effect::SaveVisual(draft) => {
                 let mut updated = state.preferences.clone();
-                updated.evolution_home.cinema_dock_scale = scale;
-                updated.evolution_home.dock_horizontal = horizontal;
+                draft.apply(&mut updated);
                 if let Err(error) = storage::save(preferences, &updated) {
                     eprintln!("{error}");
                     state.notify(state.preferences.language.t("savedError"));
                 } else {
-                    state.dock_settings_saved(scale, horizontal);
-                }
-            }
-            Effect::SaveCinemaScale(scale) => {
-                let mut updated = state.preferences.clone();
-                updated.evolution_home.compact_cinema_scale = scale;
-                if let Err(error) = storage::save(preferences, &updated) {
-                    eprintln!("{error}");
-                    state.notify(state.preferences.language.t("savedError"));
-                } else {
-                    state.cinema_scale_saved(scale);
+                    state.visual_saved(draft);
                 }
             }
             Effect::SaveWheelSteps(steps) => {
@@ -444,6 +513,16 @@ fn effects(
                     state.notify(state.preferences.language.t("savedError"));
                 } else {
                     state.wheel_steps_saved(steps);
+                }
+            }
+            Effect::SaveMagicRemote(draft) => {
+                let mut updated = state.preferences.clone();
+                draft.apply(&mut updated.evolution_home);
+                if let Err(error) = storage::save(preferences, &updated) {
+                    eprintln!("{error}");
+                    state.notify(state.preferences.language.t("savedError"));
+                } else {
+                    state.remote_settings_saved(draft);
                 }
             }
             Effect::Save => {
@@ -545,7 +624,8 @@ fn script(
                     state.direction(Direction::Up, controls);
                 }
                 "preview-pointer-cinema" => {
-                    let i = home_evolution::content(state.evolution.as_ref().unwrap().selected);
+                    let home = state.evolution.as_ref().unwrap();
+                    let i = home.title_index(home.selected);
                     state.pointer_focus(Target::EvolutionContent(format!(
                         "{}:{i}",
                         home_evolution::CONTENTS[i].0
@@ -591,8 +671,8 @@ fn script(
                         home_evolution::WidgetAppFixture { calendar, weather };
                     state.reconcile_focus();
                 }
-                "preview-catalog-one" => state.evolution.as_mut().unwrap().catalog_len = Some(1),
-                "preview-catalog-empty" => state.evolution.as_mut().unwrap().catalog_len = Some(0),
+                "preview-catalog-one" => state.evolution_set_catalog_len(1),
+                "preview-catalog-empty" => state.evolution_set_catalog_len(0),
                 action if action.starts_with("preview-remove-apps:") => {
                     let ids: Vec<_> = action["preview-remove-apps:".len()..].split('|').collect();
                     let mut inventory = state.inventory.clone();
@@ -618,7 +698,9 @@ fn script(
         }
         action
             if action.starts_with("await-progress:")
+                || action.starts_with("await-motion-sample:")
                 || action == "await-cycle"
+                || action == "await-app-options"
                 || action == "await-settled" =>
         {
             if cfg!(feature = "webos") || state.evolution.is_none() {
@@ -720,15 +802,20 @@ fn main() {
 }
 
 fn compose(state: &mut State, assets: &view::Assets, now: OffsetDateTime) -> view::Scene {
-    let scene = view::scene(state, assets, now);
-    let mut scene = if !state.pointer
-        && (state.overlay.is_none() || matches!(state.overlay, Some(Overlay::Today { .. })))
+    let mut scene = view::scene(state, assets, now);
+    if state.refresh_local_focus(&scene.controls, scene.today_scroll_max) {
+        scene = view::scene(state, assets, now);
+    }
+    if !state.pointer
+        && (state.overlay.is_none()
+            || matches!(
+                state.overlay,
+                Some(Overlay::Today { .. } | Overlay::Menu { .. })
+            ))
         && state.reveal_focus(&scene.controls)
     {
-        view::scene(state, assets, now)
-    } else {
-        scene
-    };
+        scene = view::scene(state, assets, now);
+    }
     state.ticker_span = scene.ticker;
     view::home_preview(&mut scene, state, assets, now);
     scene
@@ -1201,9 +1288,18 @@ fn scripted_click(
     window: &sdl2::video::Window,
     position: &str,
 ) -> Result<(), String> {
+    scripted_button(sdl, window, position, true)?;
+    scripted_button(sdl, window, position, false)
+}
+
+fn scripted_button(
+    sdl: &sdl2::Sdl,
+    window: &sdl2::video::Window,
+    position: &str,
+    down: bool,
+) -> Result<(), String> {
     let (x, y) = scripted_pointer_position(window, position)?;
-    let events = sdl.event()?;
-    for event in [
+    let event = if down {
         Event::MouseButtonDown {
             timestamp: 0,
             window_id: window.id(),
@@ -1212,7 +1308,8 @@ fn scripted_click(
             clicks: 1,
             x,
             y,
-        },
+        }
+    } else {
         Event::MouseButtonUp {
             timestamp: 0,
             window_id: window.id(),
@@ -1221,11 +1318,9 @@ fn scripted_click(
             clicks: 1,
             x,
             y,
-        },
-    ] {
-        events.push_event(event)?;
-    }
-    Ok(())
+        }
+    };
+    sdl.event()?.push_event(event)
 }
 
 /// sam discards a system app's output. As Home, keep it in a small log.
@@ -1746,6 +1841,7 @@ fn run() -> Result<(), String> {
     let mut press: Option<Press> = None;
     // The Magic Remote pointer resting on a row's card at the screen's side slides the row on.
     let mut edge_pointer: Option<(i32, i32)> = None;
+    let mut pointer_inside = true;
     let mut edge_since: Option<Instant> = None;
     let mut edge_step = Instant::now();
     let mut back_button = BackButton::default();
@@ -2237,6 +2333,7 @@ fn run() -> Result<(), String> {
                         visible = false;
                         focused = false;
                         press = None;
+                        state.evolution_pointer_hidden(Instant::now());
                         back_button.cancel();
                         if matches!(state.overlay, Some(Overlay::SystemKeyboard)) {
                             pending = state.finish_text_input();
@@ -2256,8 +2353,17 @@ fn run() -> Result<(), String> {
                         }
                         focused = false;
                         press = None;
+                        state.evolution_pointer_hidden(Instant::now());
                         back_button.cancel();
                     }
+                    WindowEvent::Leave if !script_owns_input => {
+                        pointer_inside = false;
+                        if press.as_ref().is_some_and(Press::pointer) {
+                            press = None;
+                        }
+                        state.evolution_pointer_hidden(Instant::now());
+                    }
+                    WindowEvent::Enter => pointer_inside = true,
                     WindowEvent::Shown | WindowEvent::Restored | WindowEvent::FocusGained => {
                         visible = true;
                         // Shown and Restored can come from SDL itself; only focus confirms.
@@ -2324,30 +2430,30 @@ fn run() -> Result<(), String> {
                             }
                         }
                         Keycode::Up if !repeat || !state.recents_open() => {
+                            press = None;
                             pending = state.direction(Direction::Up, &scene.controls);
                         }
                         Keycode::Down => {
+                            press = None;
                             pending = state.direction(Direction::Down, &scene.controls)
                         }
                         Keycode::Left => {
+                            press = None;
                             pending = state.direction(Direction::Left, &scene.controls)
                         }
                         Keycode::Right => {
+                            press = None;
                             pending = state.direction(Direction::Right, &scene.controls)
                         }
                         Keycode::Return | Keycode::KpEnter
-                            if matches!(state.overlay, Some(Overlay::SystemKeyboard)) =>
+                            if !repeat
+                                && matches!(state.overlay, Some(Overlay::SystemKeyboard)) =>
                         {
                             press = None;
                             pending = state.finish_text_input();
                         }
-                        Keycode::Return | Keycode::KpEnter if !repeat => {
-                            press = Some(Press {
-                                target: state.focus.clone(),
-                                start: Instant::now(),
-                                held: false,
-                                pointer: false,
-                            });
+                        Keycode::Return | Keycode::KpEnter => {
+                            begin_ok(&mut press, &state, key, repeat, Instant::now())
                         }
                         Keycode::Backspace if state.text_input_active() => state.delete(),
                         Keycode::Backspace if !repeat => {
@@ -2385,22 +2491,28 @@ fn run() -> Result<(), String> {
                     }
                 }
                 Event::KeyUp {
-                    keycode: Some(Keycode::Return | Keycode::KpEnter),
+                    keycode: Some(key @ (Keycode::Return | Keycode::KpEnter)),
                     ..
                 } => {
-                    if let Some(held) = press.take()
-                        && !held.pointer
-                        && !held.held
-                        && held.target == state.focus
-                    {
-                        pending = state.activate();
+                    if press.as_ref().is_some_and(|p| p.key == Some(key)) {
+                        pending = press.take().unwrap().release(&mut state, Instant::now());
                     }
                 }
                 Event::MouseMotion {
-                    x, y, xrel, yrel, ..
+                    x,
+                    y,
+                    xrel,
+                    yrel,
+                    which,
+                    ..
                 } if state.moving.is_none()
                     && !state.evolution_moving()
                     && !matches!(state.overlay, Some(Overlay::SystemKeyboard))
+                    && (pointer_inside || which == SCRIPT_POINTER)
+                    && edge_pointer != Some((x, y))
+                    && (xrel != 0
+                        || yrel != 0
+                        || (state.overlay.is_none() && state.page != state::Page::Settings))
                     && state.evolution_pointer_motion(xrel, yrel) =>
                 {
                     edge_pointer = Some((x, y));
@@ -2412,7 +2524,7 @@ fn run() -> Result<(), String> {
                     }
                     if press
                         .as_ref()
-                        .is_some_and(|p| p.pointer && hovered.as_ref() != Some(&p.target))
+                        .is_some_and(|p| p.pointer() && hovered.as_ref() != Some(&p.target))
                     {
                         press = None;
                     }
@@ -2429,17 +2541,17 @@ fn run() -> Result<(), String> {
                             pending = state.finish_text_input();
                         }
                         // Pointer-down must not normalize scroll and move the clicked control.
-                        state.pointer_focus(target);
-                        if mouse_btn == MouseButton::Right {
-                            state.options();
+                        if mouse_btn == MouseButton::Left && state.intercept_settings_exit(&target)
+                        {
                             press = None;
-                        } else if mouse_btn == MouseButton::Left {
-                            press = Some(Press {
-                                target: state.focus.clone(),
-                                start: Instant::now(),
-                                held: false,
-                                pointer: true,
-                            });
+                        } else {
+                            state.pointer_focus(target);
+                            if mouse_btn == MouseButton::Right {
+                                state.options();
+                                press = None;
+                            } else if mouse_btn == MouseButton::Left {
+                                press = Some(Press::new(&state, None, Instant::now()));
+                            }
                         }
                     } else if mouse_btn == MouseButton::Left {
                         press = None;
@@ -2450,15 +2562,15 @@ fn run() -> Result<(), String> {
                     x,
                     y,
                     ..
-                } => match press.take() {
+                } if press.as_ref().is_none_or(Press::pointer) => match press.take() {
                     Some(held)
-                        if held.pointer
+                        if held.pointer()
                             && !held.held
-                            && (!state.evolution_active() || held.target == state.focus)
+                            && held.matches(&state)
                             && hit(&scene.controls, &window, x, y, &state).as_ref()
                                 == Some(&held.target) =>
                     {
-                        pending = state.activate()
+                        pending = held.release(&mut state, Instant::now())
                     }
                     None if scene.modal.is_some_and(|rect| {
                         pointer_position(&window, x, y).is_some_and(|(x, y)| !rect.contains(x, y))
@@ -2468,19 +2580,6 @@ fn run() -> Result<(), String> {
                     }
                     _ => {}
                 },
-                Event::MouseWheel { x, y, .. } if state.recents_open() => {
-                    press = None;
-                    let delta = if x != 0 { x } else { -y };
-                    if delta != 0 {
-                        pending = state.recent_direction(if delta > 0 {
-                            Direction::Right
-                        } else {
-                            Direction::Left
-                        });
-                    }
-                    state.pointer = false;
-                    state.dirty = true;
-                }
                 Event::MouseWheel {
                     x,
                     y,
@@ -2488,13 +2587,15 @@ fn run() -> Result<(), String> {
                     mouse_y,
                     direction,
                     ..
-                } if state.overlay.is_none() => {
-                    let y = if state.evolution_active()
-                        && direction == sdl2::mouse::MouseWheelDirection::Flipped
+                } => {
+                    let (x, y) = if direction == sdl2::mouse::MouseWheelDirection::Flipped
+                        && (state.evolution_active()
+                            || state.overlay.is_some()
+                            || state.page == state::Page::Settings)
                     {
-                        y.saturating_neg()
+                        (x.saturating_neg(), y.saturating_neg())
                     } else {
-                        y
+                        (x, y)
                     };
                     if state.wheel_scroll(
                         &scene.controls,
@@ -2528,7 +2629,7 @@ fn run() -> Result<(), String> {
             );
             if press
                 .as_ref()
-                .is_some_and(|p| !p.held && p.target != state.focus)
+                .is_some_and(|p| !p.held && !p.matches(&state))
             {
                 press = None;
             }
@@ -2556,14 +2657,8 @@ fn run() -> Result<(), String> {
                 &updates,
             );
         }
-        if let Some(held) = &mut press
-            && !held.held
-            && (!state.evolution_active() || held.target == state.focus)
-            && held.start.elapsed() >= Duration::from_millis(600)
-        {
-            held.held = true;
-            state.pressed = None;
-            state.hold();
+        if let Some(held) = &mut press {
+            held.hold_if_due(&mut state, Instant::now());
         }
         if !state.loading
             && (frame.is_multiple_of(3)
@@ -2573,6 +2668,16 @@ fn run() -> Result<(), String> {
                     .is_some_and(|a| a.starts_with("await-pause:")))
             && !options.script.front().is_some_and(|action| {
                 (action == "await-settled" && state.animating())
+                    || (action
+                        .strip_prefix("await-motion-sample:")
+                        .and_then(|ms| ms.parse::<u128>().ok())
+                        .is_some_and(|ms| {
+                            state
+                                .motion_sample
+                                .is_some_and(|start| start.elapsed().as_millis() < ms)
+                        }))
+                    || (action == "await-app-options"
+                        && !matches!(state.overlay, Some(Overlay::Options { .. })))
                     || (action == "await-cycle"
                         && state
                             .evolution
@@ -2607,7 +2712,7 @@ fn run() -> Result<(), String> {
                 options.frames = Some(frame + 1);
             } else if action == "preview-finish" && state.evolution.is_some() {
                 options.frames = Some(frame + 12);
-            } else if action == "preview-click-dock"
+            } else if matches!(action.as_str(), "preview-click-dock" | "preview-press-dock")
                 && state.evolution.is_some()
                 && !cfg!(feature = "webos")
             {
@@ -2617,8 +2722,18 @@ fn run() -> Result<(), String> {
                     .find(|c| matches!(c.target, Target::App(_)))
                 {
                     let (x, y) = control.rect.center();
-                    scripted_click(&sdl, &window, &format!("{x}:{y}"))?;
+                    let position = format!("{x}:{y}");
+                    if action == "preview-press-dock" {
+                        scripted_button(&sdl, &window, &position, true)?;
+                    } else {
+                        scripted_click(&sdl, &window, &position)?;
+                    }
                 }
+            } else if action == "preview-release-dock"
+                && state.evolution.is_some()
+                && !cfg!(feature = "webos")
+            {
+                scripted_button(&sdl, &window, "0:0", false)?;
             } else if let Some(position) = action.strip_prefix("click:") {
                 scripted_click(&sdl, &window, position)?;
             } else if let Some(motion) = action.strip_prefix("preview-motion:") {
@@ -3089,8 +3204,9 @@ fn run() -> Result<(), String> {
     if let Some(path) = options.dump {
         let state = serde_json::json!({ "page": state.page, "focus": state.focus, "pointer": state.pointer, "query": state.query,
             "filter": state.filter, "preferences": state.preferences, "apps": state.apps().iter().map(|a| &a.id).collect::<Vec<_>>(),
-            "home_preview": state.evolution.as_ref().map(|home| serde_json::json!({"selected": home_evolution::content(home.selected), "first": home.first, "expanded": home.expanded, "expansion": home.expansion.value,
+            "home_preview": state.evolution.as_ref().map(|home| serde_json::json!({"selected": home.title_index(home.selected), "first": home.first, "expanded": home.expanded, "expansion": home.expansion.value,
                 "top_expansion": home.top_expansion.value, "moving": state.evolution_moving(),
+                "motion_sample_active": scene.motion_sample_active,
                 "compact_cinema_percent": state.compact_cinema_percent(),
                 "simulated_widget_apps": home.widget_apps,
                 "simulated_widget_open": home.simulated_widget_open,

@@ -1,5 +1,10 @@
 //! Native Evolution Home. Preferences persist; navigation and hover never do.
 //! Enabled only by the explicitly requested desktop preview, never by TV inventory fallback.
+pub use crate::home_motion::MotionProfile;
+use crate::home_motion::{Motion, MotionCurve, MotionPart, MotionSpeed};
+use crate::home_visual::{
+    CinemaDetails, CinemaLayout, DockLabels, DockPosition, DockTheme, WeatherDetails, WidgetsLayout,
+};
 use crate::state::{Direction, Page, Rect, State, Target};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -91,16 +96,40 @@ fn global_slots<'de, D: serde::Deserializer<'de>>(d: D) -> Result<[usize; 2], D:
 pub struct Preferences {
     pub show_top: bool,
     pub show_center: bool,
+    #[serde(deserialize_with = "crate::home_visual::read_option")]
     pub dock_size: DockSize,
+    #[serde(deserialize_with = "crate::home_visual::read_option")]
+    pub dock_theme: DockTheme,
+    #[serde(deserialize_with = "crate::home_visual::read_option")]
+    pub dock_position: DockPosition,
+    #[serde(deserialize_with = "crate::home_visual::read_option")]
+    pub dock_labels: DockLabels,
+    #[serde(deserialize_with = "crate::home_visual::read_option")]
+    pub widgets_layout: WidgetsLayout,
+    #[serde(deserialize_with = "crate::home_visual::read_option")]
+    pub weather_details: WeatherDetails,
+    #[serde(deserialize_with = "crate::home_visual::read_option")]
+    pub cinema_layout: CinemaLayout,
+    #[serde(deserialize_with = "crate::home_visual::read_option")]
+    pub cinema_details: CinemaDetails,
     pub cinema_dock_scale: DockScale,
     #[serde(deserialize_with = "deserialize_dock_horizontal")]
     pub dock_horizontal: DockHorizontal,
     pub compact_cinema_scale: CinemaScale,
     pub wheel_steps: WheelSteps,
+    pub panel_focus: crate::state::PanelFocusMode,
+    #[serde(deserialize_with = "crate::magic_remote::read_hold")]
+    pub hold_ms: u64,
+    #[serde(deserialize_with = "crate::magic_remote::read_hover")]
     pub hover_ms: u64,
+    #[serde(deserialize_with = "crate::magic_remote::read_leave")]
     pub leave_ms: u64,
     pub pointer_expands: bool,
+    #[serde(deserialize_with = "crate::home_visual::read_option")]
     pub motion_profile: MotionProfile,
+    #[serde(deserialize_with = "crate::home_visual::read_option")]
+    pub motion_curve: MotionCurve,
+    pub motion_speed: MotionSpeed,
     pub rotation_enabled: bool,
     #[serde(deserialize_with = "rotation_interval")]
     pub rotation_seconds: u64,
@@ -112,15 +141,6 @@ pub struct Preferences {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MotionProfile {
-    #[default]
-    Balanced,
-    Reduced,
-    None,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DockSize {
     Compact,
@@ -276,14 +296,25 @@ impl Default for Preferences {
             show_top: true,
             show_center: true,
             dock_size: DockSize::Standard,
+            dock_theme: DockTheme::default(),
+            dock_position: DockPosition::default(),
+            dock_labels: DockLabels::default(),
+            widgets_layout: WidgetsLayout::default(),
+            weather_details: WeatherDetails::default(),
+            cinema_layout: CinemaLayout::default(),
+            cinema_details: CinemaDetails::default(),
             cinema_dock_scale: DockScale::default(),
             dock_horizontal: DockHorizontal::default(),
             compact_cinema_scale: CinemaScale::default(),
             wheel_steps: WheelSteps::default(),
-            hover_ms: 250,
-            leave_ms: 350,
+            panel_focus: crate::state::PanelFocusMode::default(),
+            hold_ms: crate::magic_remote::Timing::Hold.default_ms(),
+            hover_ms: crate::magic_remote::Timing::Hover.default_ms(),
+            leave_ms: crate::magic_remote::Timing::Leave.default_ms(),
             pointer_expands: true,
             motion_profile: MotionProfile::Balanced,
+            motion_curve: MotionCurve::default(),
+            motion_speed: MotionSpeed::default(),
             rotation_enabled: true,
             rotation_seconds: 10,
             global_position: GlobalPosition::Top,
@@ -450,17 +481,24 @@ pub struct Tween {
 }
 
 impl Tween {
+    #[cfg(test)]
     fn advance(&mut self, target: f32, dt: f32, duration: f32, reduced: bool) -> bool {
-        self.advance_curve(target, dt, duration, reduced, false)
+        self.advance_eased(target, dt, if reduced { 0. } else { duration }, |elapsed| {
+            let t = elapsed / duration;
+            if t < 0.5 {
+                4. * t.powi(3)
+            } else {
+                1. - (-2. * t + 2.).powi(3) / 2.
+            }
+        })
     }
 
-    fn advance_curve(
+    fn advance_eased(
         &mut self,
         target: f32,
         dt: f32,
         duration: f32,
-        reduced: bool,
-        ease_out: bool,
+        ease: impl FnOnce(f32) -> f32,
     ) -> bool {
         let before = self.value;
         if target != self.target {
@@ -469,16 +507,18 @@ impl Tween {
             self.elapsed = 0.;
         }
         self.elapsed = (self.elapsed + dt.max(0.)).min(duration);
-        let t = if reduced { 1. } else { self.elapsed / duration };
-        let eased = if ease_out {
-            1. - (1. - t).powi(3)
-        } else if t < 0.5 {
-            4. * t.powi(3)
+        self.value = if self.elapsed >= duration {
+            target
         } else {
-            1. - (-2. * t + 2.).powi(3) / 2.
+            self.from + (target - self.from) * ease(self.elapsed)
         };
-        self.value = self.from + (self.target - self.from) * eased;
         before != self.value
+    }
+
+    fn animate(&mut self, target: f32, dt: f32, motion: Motion, part: MotionPart) -> bool {
+        self.advance_eased(target, dt, motion.duration(part), |elapsed| {
+            motion.progress(part, elapsed)
+        })
     }
 
     pub fn moving(&self) -> bool {
@@ -493,6 +533,13 @@ pub struct Home {
     pub first: i64,
     pub expansion: Tween,
     pub carousel: Tween,
+    pub backdrop: Tween,
+    pub backdrop_previous: Option<usize>,
+    backdrop_selected: Option<usize>,
+    pub cinema_opacity: Tween,
+    pub widgets_opacity: Tween,
+    pub focused_card: Option<Target>,
+    pub card_focus: Tween,
     pub expanded: bool,
     pub last_dock: Option<Target>,
     favorite_order: Vec<String>,
@@ -530,10 +577,6 @@ pub struct Home {
     pub catalog_len: Option<usize>,
 }
 
-pub fn content(position: i64) -> usize {
-    position.rem_euclid(CONTENTS.len() as i64) as usize
-}
-
 pub fn compact_header(prefs: &crate::model::Preferences, now: time::OffsetDateTime) -> String {
     let language = prefs.language;
     let clock = language.clock(now, prefs.hour_24, prefs.show_seconds);
@@ -551,6 +594,11 @@ pub fn compact_header(prefs: &crate::model::Preferences, now: time::OffsetDateTi
         label.push_str(&prefs.date_format.format(language, now));
     }
     label
+}
+
+#[cfg(test)]
+pub fn content(position: i64) -> usize {
+    position.rem_euclid(CONTENTS.len() as i64) as usize
 }
 
 impl Home {
@@ -594,15 +642,27 @@ impl Home {
         }
     }
 
+    pub fn title_count(&self) -> usize {
+        self.catalog_len
+            .unwrap_or(CONTENTS.len())
+            .min(CONTENTS.len())
+    }
+
+    pub fn title_index(&self, position: i64) -> usize {
+        position.rem_euclid(self.title_count().max(1) as i64) as usize
+    }
+
     pub fn step(&mut self, delta: i64) {
-        if self.catalog_len.is_some_and(|count| count < 2) {
+        let count = self.title_count();
+        if count < 2 {
             return;
         }
+        let visible = VISIBLE.min(count) as i64;
         self.selected += delta;
         if self.selected < self.first {
             self.first = self.selected;
-        } else if self.selected >= self.first + VISIBLE as i64 {
-            self.first = self.selected - VISIBLE as i64 + 1;
+        } else if self.selected >= self.first + visible {
+            self.first = self.selected - visible + 1;
         }
     }
 
@@ -722,8 +782,12 @@ impl DockFlow {
         };
         let hint_height = if empty { DOCK_EMPTY_HEIGHT } else { 0. };
         let insets = 2. * padding + hint_height;
-        let bottom_aligned = DOCK_REST_BOTTOM - grid_height - insets;
-        let single_row_top = DOCK_REST_BOTTOM - grid_height.min(h) - insets;
+        let dock_bottom = match prefs.dock_position {
+            DockPosition::Standard => DOCK_REST_BOTTOM,
+            DockPosition::Raised => 1080. - 120.,
+        };
+        let bottom_aligned = dock_bottom - grid_height - insets;
+        let single_row_top = dock_bottom - grid_height.min(h) - insets;
         let pane_top = bottom_aligned.max(upper_bottom.min(single_row_top));
         let first_y = pane_top + padding + hint_height;
         let grid_width = if rows == 0 {
@@ -755,7 +819,7 @@ impl DockFlow {
             focus_above,
             focus_below,
             empty_hint,
-            input_y: (pane.y + pane.h).max(DOCK_REST_BOTTOM) + DOCK_INPUT_GAP,
+            input_y: (pane.y + pane.h).max(dock_bottom) + DOCK_INPUT_GAP,
         }
     }
 
@@ -1144,13 +1208,71 @@ impl State {
 
     fn evolution_center_target(&self) -> Target {
         let home = self.evolution.as_ref().unwrap();
-        let i = content(home.selected);
+        let i = home.title_index(home.selected);
         Target::EvolutionContent(format!("{}:{i}", CONTENTS[i].0))
     }
 
-    fn evolution_has_cinema(&self) -> bool {
+    pub(crate) fn evolution_set_catalog_len(&mut self, count: usize) {
+        let home = self.evolution.as_mut().unwrap();
+        let previous_count = home.title_count();
+        let selected = home.title_index(home.selected);
+        home.catalog_len = Some(count);
+        let count = home.title_count();
+        if previous_count == count {
+            return;
+        }
+
+        let slot =
+            (home.selected - home.first).clamp(0, VISIBLE.min(count).saturating_sub(1) as i64);
+        // A confirmed removal in the preview removes a suffix of the ordered fixture. The next
+        // valid title on the circular row is the first one when the previous ID was in that suffix.
+        home.selected = if selected < count { selected as i64 } else { 0 };
+        home.first = home.selected - slot;
+        home.carousel = Tween {
+            value: home.first as f32,
+            target: home.first as f32,
+            ..Tween::default()
+        };
+        home.backdrop_selected = (count > 0).then_some(home.selected as usize);
+        home.backdrop_previous = None;
+        home.rotation.reset();
+        home.cancel_hover();
+        let removed = |target: &Target| match target {
+            Target::EvolutionContent(id) => {
+                Self::evolution_content_index(id).is_none_or(|index| index >= count)
+            }
+            Target::EvolutionArea(Area::Cinema) => count == 0,
+            _ => false,
+        };
+        if home.pointer_target.as_ref().is_some_and(removed) || count == 0 {
+            home.pointer_target = None;
+            home.pointer_in_cinema = false;
+        }
+        if count == 0 {
+            home.expanded = false;
+        }
+        if self.pressed.as_ref().is_some_and(removed) {
+            self.pressed = None;
+        }
+        if self.evolution_active() && removed(&self.focus) {
+            if count == 0 {
+                self.evolution_focus_dock(self.evolution_dock());
+            } else {
+                self.focus = self.evolution_center_target();
+            }
+        }
+        self.dirty = true;
+    }
+
+    pub(crate) fn evolution_has_cinema(&self) -> bool {
         self.preferences.evolution_home.show_center
             && self.evolution.as_ref().unwrap().catalog_len != Some(0)
+    }
+
+    pub(crate) fn evolution_content_index(id: &str) -> Option<usize> {
+        let (key, index) = id.rsplit_once(':')?;
+        let index = index.parse::<usize>().ok()?;
+        (CONTENTS.get(index)?.0 == key).then_some(index)
     }
 
     pub fn evolution_widget_eligible(&self, app: WidgetApp) -> bool {
@@ -1242,8 +1364,7 @@ impl State {
         ];
         let up = y > 0;
         let threshold = self.preferences.evolution_home.wheel_steps.value();
-        let animate = !self.preferences.reduced_motion
-            && self.preferences.evolution_home.motion_profile == MotionProfile::Balanced;
+        let animate = Motion::saved(&self.preferences).profile.geometric();
         let from = animate.then(|| self.evolution_geometry().offset);
         let mut changed_area = false;
         let home = self.evolution.as_mut().unwrap();
@@ -1297,7 +1418,12 @@ impl State {
                 && from != self.evolution_geometry().offset
             {
                 let mut progress = Tween::default();
-                progress.advance(1., 0., 0.30, false);
+                progress.animate(
+                    1.,
+                    0.,
+                    Motion::saved(&self.preferences),
+                    MotionPart::Collapse,
+                );
                 self.evolution.as_mut().unwrap().wheel_viewport = Some((from, progress));
             }
             self.dirty = true;
@@ -1526,6 +1652,7 @@ impl State {
         self.dirty |= open != home.top_open;
         home.set_widgets_open(open);
         home.pointer_in_cinema = matches!(target, Some(Target::EvolutionContent(_)));
+        let changed_target = home.pointer_target.as_ref() != target;
         home.pointer_target = target.cloned();
         if home.pointer_in_cinema {
             home.rotation.paused = true;
@@ -1534,11 +1661,7 @@ impl State {
         match target {
             Some(Target::EvolutionContent(id)) => {
                 home.leave = None;
-                if home
-                    .hover
-                    .as_ref()
-                    .is_none_or(|(previous, _)| previous != id)
-                {
+                if changed_target {
                     home.hover = Some((id.clone(), now));
                 }
             }
@@ -1551,12 +1674,31 @@ impl State {
         }
     }
 
+    pub fn evolution_pointer_hidden(&mut self, now: Instant) {
+        if self.pointer {
+            self.evolution_hover_gap(None, now);
+        }
+        if let Some(home) = &mut self.evolution {
+            home.hover = None;
+            home.pointer_target = None;
+            home.pointer_in_cinema = false;
+        }
+    }
+
     pub fn evolution_tick(&mut self, dt: f32) {
+        self.evolution_tick_at(dt, Instant::now());
+    }
+
+    pub(crate) fn evolution_tick_at(&mut self, dt: f32, now: Instant) {
+        use crate::magic_remote::Timing;
         if !self.evolution_active() {
             if let Some(home) = self.evolution.as_mut() {
                 home.wheel_partial = None;
                 home.rotation.paused = true;
                 home.rotation.started = None;
+                home.cancel_hover();
+                home.pointer_target = None;
+                home.pointer_in_cinema = false;
             }
             return;
         }
@@ -1571,12 +1713,20 @@ impl State {
             .evolution_top_targets()
             .iter()
             .position(|t| focused == Some(t));
+        let focused_card = focused
+            .filter(|target| {
+                matches!(
+                    target,
+                    Target::App(_) | Target::EvolutionContent(_) | Target::EvolutionGlobal(_)
+                )
+            })
+            .cloned();
         let home = self.evolution.as_mut().unwrap();
-        home.expire_wheel(Instant::now());
+        home.expire_wheel(now);
         let eligible = prefs.rotation_enabled
             && !home.suspended
             && prefs.show_center
-            && home.catalog_len.unwrap_or(CONTENTS.len()) > 1
+            && home.title_count() > 1
             && !home.top_open
             && self.pressed.is_none()
             && !home.pointer_in_cinema
@@ -1584,12 +1734,9 @@ impl State {
             && (self.pointer || !matches!(self.focus, Target::EvolutionContent(_)));
         let before = home.rotation.progress();
         let advanced = !home.defer_rotation
-            && home.rotation.tick(
-                Instant::now(),
-                eligible,
-                prefs.rotation_seconds,
-                home.selected,
-            );
+            && home
+                .rotation
+                .tick(now, eligible, prefs.rotation_seconds, home.selected);
         if advanced {
             home.step(1);
         }
@@ -1599,67 +1746,106 @@ impl State {
             return;
         }
         if self.pointer {
-            if let Some((id, since)) = &home.hover
-                && since.elapsed() >= Duration::from_millis(prefs.hover_ms.clamp(50, 2000))
-                && let Some(index) = id.rsplit(':').next().and_then(|v| v.parse::<usize>().ok())
-                && index < CONTENTS.len()
-            {
-                let selected =
-                    home.first + (index as i64 - home.first).rem_euclid(CONTENTS.len() as i64);
-                if home.selected != selected {
-                    home.rotation.reset();
-                    self.dirty = true;
+            if let Some((id, since)) = &home.hover {
+                let index =
+                    Self::evolution_content_index(id).filter(|index| *index < home.title_count());
+                let same_card = matches!(&home.pointer_target,
+                    Some(Target::EvolutionContent(target)) if target == id);
+                if !prefs.show_center || home.catalog_len == Some(0) || !same_card {
+                    home.hover = None;
+                } else if let Some(index) = index {
+                    if now.duration_since(*since)
+                        >= Duration::from_millis(Timing::Hover.normalize(prefs.hover_ms))
+                    {
+                        let selected = home.first
+                            + (index as i64 - home.first).rem_euclid(home.title_count() as i64);
+                        if home.selected != selected {
+                            home.rotation.reset();
+                            self.dirty = true;
+                        }
+                        home.selected = selected;
+                        home.expanded |= prefs.pointer_expands;
+                        home.hover = None;
+                    }
+                } else {
+                    home.hover = None;
                 }
-                home.selected = selected;
-                home.expanded = prefs.pointer_expands;
-                home.hover = None;
             }
             if home.leave.is_some_and(|since| {
-                since.elapsed() >= Duration::from_millis(prefs.leave_ms.clamp(50, 3000))
+                now.duration_since(since)
+                    >= Duration::from_millis(Timing::Leave.normalize(prefs.leave_ms))
             }) {
                 home.expanded = false;
                 home.leave = None;
             }
         }
-        let duration = if home.expanded { 0.32 } else { 0.30 };
-        let instant =
-            self.preferences.reduced_motion || prefs.motion_profile != MotionProfile::Balanced;
+        let motion = Motion::saved(&self.preferences);
+        if home.focused_card != focused_card {
+            home.focused_card = focused_card;
+            home.card_focus = Tween::default();
+        }
+        let focus_part = if motion.profile == MotionProfile::Reduced {
+            MotionPart::Backdrop
+        } else {
+            MotionPart::Focus
+        };
+        self.dirty |= home.card_focus.animate(1., dt, motion, focus_part);
+        let part = |expanded| {
+            if expanded {
+                MotionPart::Expand
+            } else {
+                MotionPart::Collapse
+            }
+        };
         if let Some((_, progress)) = &mut home.wheel_viewport {
-            self.dirty |= progress.advance(1., dt, 0.30, instant);
+            self.dirty |= progress.animate(1., dt, motion, MotionPart::Collapse);
             if !progress.moving() {
                 home.wheel_viewport = None;
             }
         }
-        let top_target = home.top_open;
         self.dirty |=
             home.top_expansion
-                .advance(if top_target { 1. } else { 0. }, dt, 0.3, instant);
-        self.dirty |= home.top_label.advance(
-            if selected_button.is_some() { 1. } else { 0. },
+                .animate(f32::from(home.top_open), dt, motion, part(home.top_open));
+        self.dirty |= home.top_label.animate(
+            f32::from(selected_button.is_some()),
             dt,
-            0.18,
-            instant,
+            motion,
+            MotionPart::Focus,
         );
         for (index, tween) in home.button_focus.iter_mut().enumerate() {
-            self.dirty |= tween.advance(
-                if selected_button == Some(index) {
-                    1.
-                } else {
-                    0.
-                },
+            self.dirty |= tween.animate(
+                f32::from(selected_button == Some(index)),
                 dt,
-                0.18,
-                instant,
+                motion,
+                focus_part,
             );
         }
         self.dirty |=
             home.expansion
-                .advance(if home.expanded { 1. } else { 0. }, dt, duration, instant);
+                .animate(f32::from(home.expanded), dt, motion, part(home.expanded));
+        self.dirty |=
+            home.cinema_opacity
+                .animate(f32::from(home.expanded), dt, motion, MotionPart::Backdrop);
+        self.dirty |= home.widgets_opacity.animate(
+            f32::from(home.top_open),
+            dt,
+            motion,
+            MotionPart::Backdrop,
+        );
+        let selected = home.title_index(home.selected);
+        if home.backdrop_selected != Some(selected) {
+            home.backdrop_previous = home.backdrop_selected.replace(selected);
+            home.backdrop = Tween::default();
+        }
+        self.dirty |= home.backdrop.animate(1., dt, motion, MotionPart::Backdrop);
+        if !home.backdrop.moving() {
+            home.backdrop_previous = None;
+        }
         // Pointer input stops the row at its displayed position, keeping click targets stable.
-        if !self.pointer || eligible {
-            self.dirty |= home
-                .carousel
-                .advance_curve(home.first as f32, dt, 0.20, instant, true);
+        if !self.pointer || eligible || !motion.profile.geometric() {
+            self.dirty |=
+                home.carousel
+                    .animate(home.first as f32, dt, motion, MotionPart::Carousel);
         }
     }
 }
@@ -1769,7 +1955,7 @@ mod tests {
         let mut home = Home::default();
         home.step(-1);
         assert_eq!(
-            (home.selected, home.first, content(home.selected)),
+            (home.selected, home.first, home.title_index(home.selected)),
             (-1, -1, 7)
         );
         for _ in 0..4 {

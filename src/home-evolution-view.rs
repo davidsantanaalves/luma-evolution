@@ -2,7 +2,10 @@
 use super::*;
 use crate::home_evolution::{
     CARD_FOCUS_GROWTH, CARD_SHADOW_BLUR, CARD_SHADOW_DROP, CONTENTS, DOCK_CAPTION_HEIGHT,
-    DOCK_CAPTION_TOP, VISIBLE, WidgetApp, content,
+    DOCK_CAPTION_TOP, VISIBLE, WidgetApp,
+};
+use crate::home_visual::{
+    CinemaDetails, CinemaLayout, DockLabels, DockTheme, WeatherDetails, WidgetsLayout,
 };
 include!("home-evolution-details.rs");
 
@@ -15,22 +18,32 @@ fn clipped(rect: Rect, viewport: Rect) -> Rect {
 }
 
 fn card(out: &mut Scene, state: &State, target: Target, rect: Rect) -> Rect {
+    let home = state.evolution.as_ref().unwrap();
     let focused = state.focus == target;
-    // Fixed hit regions: drawing the focus lift never redistributes neighboring controls.
-    out.control(target, rect, false);
-    let shown = if focused {
-        Rect::new(
-            rect.x - rect.w * CARD_FOCUS_GROWTH,
-            rect.y - rect.h * CARD_FOCUS_GROWTH,
-            rect.w * (1. + 2. * CARD_FOCUS_GROWTH),
-            rect.h * (1. + 2. * CARD_FOCUS_GROWTH),
-        )
+    let profile = crate::home_motion::Motion::saved(&state.preferences).profile;
+    let amount = if focused && home.focused_card.as_ref() == Some(&target) {
+        home.card_focus.value
     } else {
-        rect
+        f32::from(u8::from(focused))
     };
+    // Visual focus never changes the hit region.
+    out.control(target, rect, false);
+    let growth = if profile == crate::home_motion::MotionProfile::Reduced {
+        0.
+    } else {
+        CARD_FOCUS_GROWTH * amount
+    };
+    let shown = Rect::new(
+        rect.x - rect.w * growth,
+        rect.y - rect.h * growth,
+        rect.w * (1. + 2. * growth),
+        rect.h * (1. + 2. * growth),
+    );
     if focused {
+        let start = out.draw.len();
         out.shadow(shown, 18., CARD_SHADOW_BLUR, CARD_SHADOW_DROP, 0.35);
         out.ring(shown, 18.);
+        out.fade(start, amount.clamp(0., 1.), 1.);
     }
     shown
 }
@@ -86,7 +99,9 @@ fn top_buttons(
             _ => unreachable!(),
         };
         let amount = home.button_focus[i].value;
-        let shown = hit.inset(14. - 11. * amount);
+        let reduced = crate::home_motion::Motion::saved(&state.preferences).profile
+            == crate::home_motion::MotionProfile::Reduced;
+        let shown = hit.inset(14. - if reduced { 0. } else { 11. * amount });
         out.control(target.clone(), *hit, false);
         if amount > 0.
             && let Some(rgb) = state.preferences.focus_glow.rgb()
@@ -130,11 +145,12 @@ fn widgets(
     let home = state.evolution.as_ref().unwrap();
     let prefs = &state.preferences;
     let language = prefs.language;
-    let expanded = home.top_expansion.value;
-    let cinema = home.expansion.value;
+    let expanded = home.top_expansion.value.clamp(0., 1.);
+    let cinema = home.expansion.value.clamp(0., 1.);
+    let compact = prefs.evolution_home.widgets_layout == WidgetsLayout::Compact && expanded < 0.5;
     let y = layout.clock.y;
     let left = layout.clock.x;
-    if cinema < 0.5 {
+    if cinema < 0.5 && !compact {
         let start = out.draw.len();
         single_line(
             out,
@@ -166,7 +182,7 @@ fn widgets(
         }
         out.fade(start, 1. - cinema * 2., 1.);
     }
-    if cinema > 0.4 {
+    if cinema > 0.4 || compact {
         let start = out.draw.len();
         single_line(
             out,
@@ -176,7 +192,15 @@ fn widgets(
             text(28., 550, -0.02).shadow(),
             false,
         );
-        out.fade(start, ((cinema - 0.4) / 0.6).min(1.), 1.);
+        out.fade(
+            start,
+            if compact {
+                1.
+            } else {
+                ((cinema - 0.4) / 0.6).clamp(0., 1.)
+            },
+            1.,
+        );
     }
 
     let right = layout.weather.x + layout.weather.w;
@@ -212,11 +236,17 @@ fn widgets(
                     .to_owned()
             },
             |r| {
-                format!(
-                    "{} · {}",
-                    weather::format_temperature(r.temperature, prefs.temperature_unit),
-                    language.t(condition.as_ref().unwrap().key)
-                )
+                let temperature =
+                    weather::format_temperature(r.temperature, prefs.temperature_unit);
+                if prefs.evolution_home.weather_details == WeatherDetails::Minimal && expanded == 0.
+                {
+                    temperature
+                } else {
+                    format!(
+                        "{temperature} · {}",
+                        language.t(condition.as_ref().unwrap().key)
+                    )
+                }
             },
         );
         let line = right_line(
@@ -246,12 +276,37 @@ fn widgets(
                 }
             })
         };
-        if let Some(location) = location {
+        if let Some(mut location) = location {
+            if fixture == WeatherFixture::Ready
+                && prefs.evolution_home.weather_details != WeatherDetails::Minimal
+            {
+                let format = |value| weather::format_temperature(value, prefs.temperature_unit);
+                location = format!("{location}  ·  ↑ {}  ↓ {}", format(27.), format(19.));
+            }
             right_line(
                 out,
                 assets,
                 &location,
                 Rect::new(layout.weather.x, y + 49., layout.weather.w, 32.),
+                text(20., 500, 0.).shadow(),
+            );
+        }
+        if fixture == WeatherFixture::Ready
+            && prefs.evolution_home.weather_details == WeatherDetails::Detailed
+            && expanded == 0.
+        {
+            let detail = language.format(
+                "evolutionWeatherFeels",
+                &[(
+                    "temperature",
+                    &weather::format_temperature(25., prefs.temperature_unit),
+                )],
+            );
+            right_line(
+                out,
+                assets,
+                &detail,
+                Rect::new(layout.weather.x, y + 81., layout.weather.w, 30.),
                 text(20., 500, 0.).shadow(),
             );
         }
@@ -285,7 +340,17 @@ fn widgets(
             );
         }
         out.draw.push(Draw::Clip(Some(viewport)));
-        out.fade(start, (expanded * 1.6).min(1.), 1.);
+        out.fade(
+            start,
+            if crate::home_motion::Motion::saved(prefs).profile
+                == crate::home_motion::MotionProfile::Reduced
+            {
+                home.widgets_opacity.value
+            } else {
+                (expanded * 1.6).min(1.)
+            },
+            1.,
+        );
     }
 
     // Match the weather column, keeping the compact clock outside the hit areas.
@@ -331,13 +396,21 @@ fn cinema(
         return;
     }
     let home = state.evolution.as_ref().unwrap();
-    let expansion = home.expansion.value;
-    let (background, selected_title, detail) = CONTENTS[content(home.selected)];
+    let prefs = &state.preferences.evolution_home;
+    let expansion = home.expansion.value.clamp(0., 1.);
+    let selected = home.title_index(home.selected);
+    let (background, selected_title, detail) = CONTENTS[selected];
     let language = state.preferences.language;
-    let visible = VISIBLE.min(home.catalog_len.unwrap_or(CONTENTS.len()));
+    let visible = VISIBLE.min(home.title_count());
+    let spotlight = prefs.cinema_layout == CinemaLayout::Spotlight;
+    let backdrop_opacity = match prefs.cinema_layout {
+        CinemaLayout::Strip => 0.,
+        CinemaLayout::Spotlight => 1.,
+        CinemaLayout::Hybrid => home.cinema_opacity.value.clamp(0., 1.),
+    };
 
     // Keep the photo at its native ratio and reveal it through the expanding region.
-    if expansion > 0. {
+    if backdrop_opacity > 0. {
         let art_height = rect.w * 9. / 16.;
         let art = Rect::new(
             rect.x,
@@ -361,18 +434,30 @@ fn cinema(
             right - 76.,
             right,
         ])));
+        let crossfade = if let Some(previous) = home.backdrop_previous {
+            out.draw.push(Draw::TintedImage(
+                assets.background_shaded(state, CONTENTS[previous].0, false),
+                art,
+                0.,
+                false,
+                c(0xffffff, backdrop_opacity * 0.92),
+            ));
+            home.backdrop.value
+        } else {
+            1.
+        };
         out.draw.push(Draw::TintedImage(
             assets.background_shaded(state, background, false),
             art,
             0.,
             false,
-            [1., 1., 1., expansion * 0.92],
+            c(0xffffff, backdrop_opacity * 0.92 * crossfade),
         ));
         out.draw.push(Draw::RoundedGradient(
             rect,
             0.,
-            c(0x0a101a, 0.48 * expansion),
-            c(0x0a101a, 0.83 * expansion),
+            c(0x0a101a, 0.48 * backdrop_opacity),
+            c(0x0a101a, 0.83 * backdrop_opacity),
         ));
         out.draw.push(Draw::EdgeFade(None));
         out.draw.push(Draw::EdgeFadeX(None));
@@ -397,7 +482,7 @@ fn cinema(
         WHITE,
         false,
     );
-    if y - rect.y > 150. {
+    if y - rect.y > 150. && prefs.cinema_layout != CinemaLayout::Strip {
         let start = out.draw.len();
         out.text(
             selected_title,
@@ -407,21 +492,24 @@ fn cinema(
             false,
         );
         out.text(
-            detail,
+            if prefs.cinema_details == CinemaDetails::Minimal {
+                detail.split('·').next().unwrap_or(detail).trim()
+            } else {
+                detail
+            },
             Rect::new(rect.x + 26., rect.y + 117., rect.w - 52., 34.),
             text(24., 500, 0.).shadow(),
             WHITE,
             false,
         );
-        out.fade(start, expansion, 1.);
+        out.fade(start, if spotlight { 1. } else { backdrop_opacity }, 1.);
     }
 
     let strip = Rect::new(x - 19., y - 18., strip_width + 38., height + 36.);
     out.draw.push(Draw::Clip(Some(clipped(strip, viewport))));
     let first = home.carousel.value.floor() as i64;
     for position in first - 1..first + visible as i64 + 2 {
-        let n =
-            content(position.rem_euclid(home.catalog_len.unwrap_or(CONTENTS.len()).max(1) as i64));
+        let n = home.title_index(position);
         let (art, title, _) = CONTENTS[n];
         let rect = Rect::new(
             x + (position as f32 - home.carousel.value) * (width + gap),
@@ -468,11 +556,7 @@ fn cinema(
             text(18., 550, 0.).shadow(),
             false,
         );
-        if n == content(home.selected)
-            && expansion > 0.
-            && state.preferences.evolution_home.rotation_enabled
-            && home.catalog_len.unwrap_or(CONTENTS.len()) > 1
-        {
+        if n == selected && expansion > 0. && prefs.rotation_enabled && home.title_count() > 1 {
             let progress = home.rotation.progress();
             // Inside the artwork, below its caption. This is the rotation's own elapsed time.
             let track = Rect::new(shown.x + 12., shown.y + shown.h - 5., shown.w - 24., 2.);
@@ -521,7 +605,12 @@ fn dock(
         return;
     }
     let contraction = state.evolution.as_ref().unwrap().dock_caption_transition();
-    out.glass_tinted(pane, 30., c(0x0d1420, 0.58), 0.17);
+    let prefs = &state.preferences.evolution_home;
+    match prefs.dock_theme {
+        DockTheme::GlassPremium => out.glass_tinted(pane, 30., c(0x0d1420, 0.58), 0.17),
+        DockTheme::GlassDark => out.glass_tinted(pane, 30., c(0x080d17, 0.91), 0.10),
+        DockTheme::Minimal => {}
+    }
     if let Some(rect) = layout.empty_hint
         && clipped(rect, layout.viewport).h > 0.
     {
@@ -553,7 +642,13 @@ fn dock(
                 app_face(out, assets, app, shown, language, 18.);
                 (
                     app.title.as_str(),
-                    state.focus == *target || state.preferences.show_home_names,
+                    match prefs.dock_labels {
+                        DockLabels::Focused => {
+                            state.focus == *target || state.preferences.show_home_names
+                        }
+                        DockLabels::Always => true,
+                        DockLabels::Hidden => false,
+                    },
                 )
             }
             Target::EvolutionGlobal(action) => {
@@ -665,7 +760,7 @@ pub fn render(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTi
     let first_scroll_control = out.controls.len();
     out.draw.push(Draw::Clip(Some(layout.viewport)));
 
-    if prefs.show_center && home.catalog_len.unwrap_or(CONTENTS.len()) > 0 {
+    if prefs.show_center && home.title_count() > 0 {
         cinema(
             out,
             state,

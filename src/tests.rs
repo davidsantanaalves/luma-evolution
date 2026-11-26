@@ -1604,17 +1604,14 @@ fn deletion_completion_does_not_steal_focus_after_dismissal() {
 }
 
 #[test]
-fn app_activation_opens_options_with_open_focused_and_next_ok_launches() {
+fn p05_app_activation_launches_directly_and_options_still_open_the_same_app() {
     for page in [0, 1] {
         let mut state = ready();
         state.open(page);
         state.focus = Target::App("netflix".into());
-        if page == 0 {
-            assert_eq!(state.activate(), vec![Effect::Launch("netflix".into())]);
-            assert!(state.overlay.is_none());
-            continue;
-        }
-        assert!(state.activate().is_empty());
+        assert_eq!(state.activate(), vec![Effect::Launch("netflix".into())]);
+        assert!(state.overlay.is_none());
+        state.options();
         assert!(matches!(state.overlay, Some(Overlay::Options { .. })));
         assert_eq!(state.focus, Target::OpenApp);
         assert_eq!(state.activate(), vec![Effect::Launch("netflix".into())]);

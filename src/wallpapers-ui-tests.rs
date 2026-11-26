@@ -393,11 +393,14 @@ fn gallery_scrolls_under_fixed_switches_through_a_mask() {
     let mut state = ready();
     state.open(2);
     state.section = 1;
-    // A page opens at its content; here, the gallery's, so the sidebar is a column of icons.
-    state.focus = Target::WallpaperGradient;
+    // The wheel belongs to the focused gallery, independently of the pointer location.
+    state.focus = Target::Background(0);
     state.set_wallpapers((1..=8).map(custom).collect());
     let before = controls(&state);
-    state.wheel_scroll(&before, Some((1000., 600.)), 0, -3);
+    let steps = state.background_count() as i32;
+    assert!(state.wheel_scroll(&before, Some((100., 400.)), 0, -steps));
+    assert_eq!(state.focus, Target::UploadWallpaper);
+    assert!(state.reveal_focus(&before));
     assert!(state.scroll > 0.);
     let scrolled = scene(&state);
     for target in [

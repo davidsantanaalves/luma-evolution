@@ -63,8 +63,9 @@ The [Area 2 selection review](docs/home-stage02-area2-selection.md) gives the ex
 and clock summary a single selection frame matching Weather and adds a localized OK hint.
 Interface → Dock controls the Dock size while Cinema is expanded. Left and Right change the
 draft by 5 percentage points from 40% to 100%. The Settings preview shows the draft with Cinema
-expanded. Apply saves it to the preview preferences. Cancel or Back discards it. Restore defaults
-asks for confirmation and stages 40% for Apply. The neutral Dock uses its base size and Area 2
+expanded. Apply saves it to the preview preferences. Cancel discards the draft, and Back prompts for
+Apply, Discard or Continue editing when changes are pending. Restore defaults asks for
+confirmation and stages 40% for Apply. The neutral Dock uses its base size and Area 2
 keeps its existing contraction. Row capacity follows the base size throughout. The existing
 Cinema viewport adapts its content when larger Dock cards leave less vertical space.
 Interface → Cinema controls the 16:9 cards on compact Home. The default is 100% of the expanded
@@ -104,6 +105,30 @@ intencional de direcionais ou movimento do ponteiro limpam o saldo parcial.
 `xvfb-run -a pnpm test:home-preview --p03` valida o preview desktop OpenGL ES a 720p e 1080p.
 A entrega de eventos e sua relação com o gesto físico na LG C1 seguem sem validação.
 Ver o [roteiro P03](https://drive.google.com/file/d/1SfwAyJjQLQGtFpQFRs2RLJMI39_6K5-Q/view).
+
+### Evolution Home personalization (P06)
+
+The desktop preview stages edits for Dock, Cinema, Home layout, global shortcut placement and
+Animations. The same preference snapshot drives the settings preview and the atomic save. A failed
+save keeps the draft and shows a save error. Category and global restoration stage defaults for
+these Evolution Home controls. Favorites, shortcut order, personal data and operational preferences
+stay in their existing storage fields.
+
+Cinema rotation offers Off and 5, 10, 15, 20 and 30 seconds, with 10 seconds as the default.
+Existing preview JSON can still load custom intervals in the previous 1–300-second range. The editor
+selects values from the approved list. With zero titles the region is omitted. With one title the
+highlight stays static. The elapsed rotation interval uses a monotonic clock and starts over when
+interaction ends or the preview returns from another page.
+
+The animation sample uses bundled wallpaper and fictional cards. Adjusting the profile, curve or
+speed restarts the finite sample. Balanced (1×) uses the five base timings in decision 18. The
+approved duration factors are 0.75× for Agile and 1.25× for Cinematic.
+Reduced motion snaps geometry and uses a 120 ms opacity fade independently of speed. No animations
+applies changes immediately. The motion settings leave Magic Remote timing and Cinema rotation
+independent.
+
+Run the targeted desktop smoke with `pnpm test:home-preview --p06`. It uses local fixtures and
+includes a write-failure scenario on Linux.
 
 ## Toolchain and commands
 

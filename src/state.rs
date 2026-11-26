@@ -1,5 +1,10 @@
-use crate::home_evolution::{CinemaScale, DockHorizontal, DockScale, WheelSteps};
+use crate::home_evolution::WheelSteps;
+use crate::home_visual::{
+    Action as VisualAction, Category as VisualCategory, Edit as VisualEdit, Field as VisualField,
+    Prompt as VisualPrompt, VisualPreferences,
+};
 use crate::i18n::Language;
+use crate::magic_remote::{Settings as RemoteSettings, Timing};
 use crate::model::{
     App, BACKGROUNDS, CATEGORIES, CUSTOM_TILE_PREFIX, CustomTile, INPUT_NAME_LIMIT, InputMode,
     Inventory, Preferences, UiSize, clean_input_name,
@@ -9,6 +14,10 @@ use crate::weather::{self, Unit};
 use serde::Serialize;
 use std::time::{Duration, Instant};
 
+#[path = "local-wheel.rs"]
+mod local_wheel;
+pub use local_wheel::PanelFocusMode;
+
 pub const BACKGROUND_SECTION: usize = 1;
 pub const INTERFACE_SCALE_ROW: usize = 8;
 pub const TV_SETTINGS_ROW: usize = 16;
@@ -16,6 +25,10 @@ pub const DOCK_ROW: usize = 17;
 pub const NAVIGATION_ROW: usize = 18;
 pub const ABOUT_ROW: usize = 19;
 pub const CINEMA_ROW: usize = 20;
+pub const MAGIC_REMOTE_ROW: usize = 21;
+pub const LAYOUT_ROW: usize = 22;
+pub const ANIMATIONS_ROW: usize = 2;
+pub const RESTORE_VISUAL_ROW: usize = 24;
 pub const WIDGETS_SECTION: usize = 2;
 pub const SYSTEM_SECTION: usize = 3;
 /// System › Luma as Home screen.
@@ -72,6 +85,8 @@ const ASIDE: f32 = 10000.;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum Target {
+    /// The owner of an empty or informational local panel has no actionable target.
+    LocalContent,
     EvolutionArea(crate::home_evolution::Area),
     EvolutionWidget(crate::home_evolution::WidgetApp),
     EvolutionGlobal(crate::home_evolution::GlobalAction),
@@ -102,6 +117,13 @@ pub enum Target {
     WheelStepsStep(bool),
     WheelApply,
     WheelCancel,
+    RemoteTiming(Timing),
+    RemoteTimingStep(Timing, bool),
+    RemoteExpansion,
+    RemoteApply,
+    RemoteCancel,
+    RemoteDiscard,
+    RemoteContinue,
     DockScale,
     DockScaleStep(bool),
     DockHorizontal,
@@ -118,6 +140,9 @@ pub enum Target {
     CinemaCancel,
     CinemaDiscard,
     CinemaContinue,
+    VisualField(VisualField),
+    VisualStep(VisualField, bool),
+    VisualAction(VisualAction),
     Widget(usize),
     GreetingName,
     GreetingNameClear,
@@ -341,18 +366,15 @@ const TODAY_OPEN: f32 = 0.25;
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum Subpage {
     Navigation,
+    PanelFocus,
+    MagicRemote {
+        draft: RemoteSettings,
+        confirming_exit: bool,
+    },
     Wheel {
         steps: WheelSteps,
     },
-    Dock {
-        scale: DockScale,
-        horizontal: DockHorizontal,
-        confirming_restore: bool,
-    },
-    Cinema {
-        scale: CinemaScale,
-        prompt: Option<CinemaScalePrompt>,
-    },
+    Visual(VisualEdit),
     About,
     AppNames,
     Greeting,
@@ -385,12 +407,6 @@ pub enum Subpage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-pub enum CinemaScalePrompt {
-    Restore,
-    Unsaved,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub enum TextField {
     Apps,
     Location,
@@ -410,12 +426,9 @@ pub enum Direction {
 #[derive(Debug, PartialEq)]
 pub enum Effect {
     Save,
-    SaveDockSettings {
-        scale: DockScale,
-        horizontal: DockHorizontal,
-    },
-    SaveCinemaScale(CinemaScale),
+    SaveVisual(VisualPreferences),
     SaveWheelSteps(WheelSteps),
+    SaveMagicRemote(RemoteSettings),
     /// Read the app inventory again, keeping decoded icons of unchanged apps.
     Refresh,
     /// Refresh apps: read the inventory and every app icon again.
@@ -453,6 +466,7 @@ pub const KEYS: [&str; 40] = [
 ];
 
 pub struct State {
+    local_wheel: local_wheel::LocalWheel,
     pub evolution: Option<crate::home_evolution::Home>,
     /// The focused card's lift and the scrolling of Home and its rows (`motion.rs`).
     pub motion: crate::motion::Motion,
@@ -464,6 +478,8 @@ pub struct State {
     pub filter: usize,
     pub section: usize,
     pub subpage: Option<Subpage>,
+    pub motion_sample: Option<Instant>,
+    prompt_restore_focus: Option<Target>,
     pub scroll: f32,
     pub home_scroll: f32,
     pub overlay: Option<Overlay>,
@@ -507,6 +523,8 @@ pub struct State {
     pub panel_started: Option<Instant>,
     /// Whether the menu lists the inputs under its Inputs item.
     pub menu_inputs: bool,
+    /// Local offset of the expanded input list under the menu's fixed actions.
+    pub menu_input_scroll: f32,
     /// The menu's slide: when it began, and whether it opens.
     pub menu_motion: Option<(Instant, bool)>,
     /// How far the opened Today card's list has scrolled.
@@ -549,6 +567,7 @@ pub struct State {
 impl State {
     pub fn new(preferences: Preferences) -> Self {
         Self {
+            local_wheel: local_wheel::LocalWheel::default(),
             evolution: None,
             motion: crate::motion::Motion::default(),
             page: Page::Home,
@@ -559,6 +578,8 @@ impl State {
             filter: 0,
             section: 0,
             subpage: None,
+            motion_sample: None,
+            prompt_restore_focus: None,
             scroll: 0.,
             home_scroll: 0.,
             overlay: None,
@@ -592,6 +613,7 @@ impl State {
             update: crate::update::InstallStatus::default(),
             panel_started: None,
             menu_inputs: false,
+            menu_input_scroll: 0.,
             menu_motion: None,
             today_scroll: 0.,
             today_tab: None,
@@ -708,6 +730,12 @@ impl State {
     }
 
     pub fn tick(&mut self) {
+        if let Some(start) = self.motion_sample {
+            self.dirty = true;
+            if start.elapsed() >= crate::home_motion::Motion::SAMPLE {
+                self.motion_sample = None;
+            }
+        }
         let recents_open = self.recents_open();
         if recents_open || self.recents.visibility > 0. {
             self.dirty |= self.recents.animate(
@@ -732,9 +760,7 @@ impl State {
         }
         if let Some(start) = self.panel_started {
             self.dirty = true;
-            let duration = if self.overlay.is_some() { 120 } else { 150 };
-            if self.preferences.reduced_motion || start.elapsed() >= Duration::from_millis(duration)
-            {
+            if start.elapsed().as_secs_f32() >= self.panel_animation_seconds() {
                 self.panel_started = None;
             }
         }
@@ -824,7 +850,13 @@ impl State {
         } else {
             vec![(Lane::Sidebar, self.sidebar_target())]
         };
-        let reduced = self.preferences.reduced_motion;
+        let reduced = if self.evolution.is_some() {
+            !crate::home_motion::Motion::saved(&self.preferences)
+                .profile
+                .geometric()
+        } else {
+            self.preferences.reduced_motion
+        };
         self.dirty |= self.motion.advance(selected.as_ref(), &lanes, dt, reduced);
         self.advance_ticker(dt);
     }
@@ -875,8 +907,13 @@ impl State {
     /// the fade's ends.
     pub fn animating_besides_wallpaper(&self) -> bool {
         (self.evolution_active()
+            && !(self.pointer && self.pressed.is_some())
             && self.evolution.as_ref().is_some_and(|home| {
                 home.expansion.moving()
+                    || home.card_focus.moving()
+                    || home.backdrop.moving()
+                    || home.cinema_opacity.moving()
+                    || home.widgets_opacity.moving()
                     || home.wheel_viewport_moving()
                     || home.top_expansion.moving()
                     || home.top_label.moving()
@@ -888,6 +925,15 @@ impl State {
             || ((self.recents_open() || self.recents.visibility > 0.)
                 && (self.recents.visibility != if self.recents_open() { 1. } else { 0. }
                     || self.recents.cards_animating(self.pointer)))
+            || (matches!(
+                self.subpage,
+                Some(Subpage::Visual(VisualEdit {
+                    category: VisualCategory::Animations,
+                    ..
+                }))
+            ) && self
+                .motion_sample
+                .is_some_and(|start| start.elapsed() < crate::home_motion::Motion::SAMPLE))
             || self.motion.animating()
             || self.panel_started.is_some()
             || self.menu_motion.is_some()
@@ -988,6 +1034,7 @@ impl State {
             self.focus.clone()
         };
         self.overlay = Some(Overlay::Menu { restore });
+        self.menu_input_scroll = 0.;
         self.focus = Target::Nav(self.page_index());
         self.pressed = None;
         // Reversing midway starts from where the panel is.
@@ -1028,6 +1075,7 @@ impl State {
         });
         self.today_scroll = 0.;
         self.today_tab = None;
+        self.focus = Target::LocalContent;
         self.today_motion = (!self.preferences.reduced_motion).then(Instant::now);
         self.pressed = None;
     }
@@ -1037,7 +1085,8 @@ impl State {
     fn show_today_tab(&mut self, tab: crate::today::Tab) {
         self.today_tab = Some(tab);
         self.today_scroll = 0.;
-        self.focus = Target::TodayTab(tab);
+        self.focus = Target::LocalContent;
+        self.local_wheel.intent = Some(local_wheel::Intent::EnterPanel);
         self.pressed = None;
         self.dirty = true;
     }
@@ -1134,6 +1183,7 @@ impl State {
         match self.focus.clone() {
             Target::MenuInputs => {
                 self.menu_inputs = !self.menu_inputs;
+                self.menu_input_scroll = 0.;
                 self.dirty = true;
             }
             Target::Nav(index) => {
@@ -1158,6 +1208,7 @@ impl State {
     }
 
     pub fn open(&mut self, index: usize) {
+        self.local_wheel = local_wheel::LocalWheel::default();
         self.weather.cancel_search();
         self.evolution_discard_wheel();
         self.evolution_reconcile_dock();
@@ -1368,6 +1419,10 @@ impl State {
             .find(|control| {
                 let viewport = if matches!(self.overlay, Some(Overlay::Today { .. })) {
                     TODAY_LIST
+                } else if matches!(self.overlay, Some(Overlay::Menu { .. }))
+                    && matches!(control.target, Target::Input(_))
+                {
+                    crate::view::MENU_INPUT_VIEWPORT
                 } else if self.page == Page::Home && matches!(control.target, Target::App(_)) {
                     self.favorites_viewport()
                 } else if matches!(
@@ -1395,14 +1450,11 @@ impl State {
         x: i32,
         y: i32,
     ) -> bool {
+        if self.contextual_wheel(controls, x, y) {
+            return true;
+        }
         if self.evolution.is_some() && self.page == Page::Home {
             return self.evolution_wheel(y, Instant::now());
-        }
-        let backgrounds =
-            self.page == Page::Settings && self.section == 1 && self.subpage.is_none();
-        if backgrounds && position.is_some_and(|(x, y)| !self.backgrounds_viewport().contains(x, y))
-        {
-            return false;
         }
         let over_favorites = self.page == Page::Home
             && position.is_some_and(|(x, y)| {
@@ -1418,11 +1470,7 @@ impl State {
             let bottom = self.scroll_bottom();
             let max = controls
                 .iter()
-                .filter(|c| {
-                    c.scrollable
-                        && (!backgrounds
-                            || matches!(c.target, Target::Background(_) | Target::UploadWallpaper))
-                })
+                .filter(|c| c.scrollable)
                 .map(|c| c.rect.y + c.rect.h + self.scroll - bottom)
                 .fold(0., f32::max);
             self.scroll = (self.scroll - y as f32 * 90.).clamp(0., max.max(0.));
@@ -1609,6 +1657,10 @@ impl State {
     }
 
     pub fn focus(&mut self, target: Target, controls: &[Control]) {
+        if matches!(self.subpage, Some(Subpage::Visual(_))) && self.intercept_settings_exit(&target)
+        {
+            return;
+        }
         self.pointer = false;
         self.focus = target;
         self.reveal_focus(controls);
@@ -1618,6 +1670,7 @@ impl State {
             }
             self.section = section;
             self.subpage = None;
+            self.scroll = 0.;
         }
         self.dirty = true;
     }
@@ -1630,6 +1683,9 @@ impl State {
         }
         if matches!(self.overlay, Some(Overlay::Today { .. })) {
             return self.reveal_today_line(controls);
+        }
+        if matches!(self.overlay, Some(Overlay::Menu { .. })) {
+            return self.reveal_menu_input(controls);
         }
         let previous = self.scroll;
         let previous_home = self.home_scroll;
@@ -1657,7 +1713,6 @@ impl State {
                     | Target::ClearFilter
                     | Target::Search
                     | Target::ClearSearch
-                    | Target::Sidebar(_)
             ) {
                 self.scroll = 0.;
             } else if control.scrollable {
@@ -1705,25 +1760,53 @@ impl State {
         self.scroll != previous || self.home_scroll != previous_home
     }
 
-    /// The opened Today card's focus: on one of its lines (the first, once it opens or when its
-    /// line leaves), scrolled into the list. With no lines left it closes.
+    fn reveal_menu_input(&mut self, controls: &[Control]) -> bool {
+        let viewport = crate::view::MENU_INPUT_VIEWPORT;
+        let previous = self.menu_input_scroll;
+        let inputs = controls
+            .iter()
+            .filter(|c| matches!(c.target, Target::Input(_)));
+        let bottom = viewport.y + viewport.h;
+        let max = inputs
+            .clone()
+            .map(|c| c.rect.y + c.rect.h + previous - bottom)
+            .fold(0., f32::max);
+        let mut scroll = previous;
+        if let Some(control) = inputs.clone().find(|c| c.target == self.focus) {
+            if control.rect.y < viewport.y {
+                scroll += control.rect.y - viewport.y;
+            } else if control.rect.y + control.rect.h > bottom {
+                scroll += control.rect.y + control.rect.h - bottom;
+            }
+        }
+        self.menu_input_scroll = scroll.clamp(0., max);
+        let changed = self.menu_input_scroll != previous;
+        self.dirty |= changed;
+        changed
+    }
+
+    /// Reveal a focused line of the opened Today card. Information-only tabs have no item focus.
     fn reveal_today_line(&mut self, controls: &[Control]) -> bool {
+        if controls.is_empty() {
+            self.overlay = None;
+            self.today_motion = None;
+            self.focus = Target::TodayCard;
+            self.dirty = true;
+            return true;
+        }
         let previous = (self.focus.clone(), self.today_scroll);
         let controls: Vec<&Control> = controls
             .iter()
             .filter(|c| !matches!(c.target, Target::TodayTab(_)))
             .collect();
+        if self.focus == Target::LocalContent
+            && !self.local_wheel.tracks_overlay()
+            && let Some(first) = controls.first()
+        {
+            self.focus = first.target.clone();
+        }
         if !controls.iter().any(|c| c.target == self.focus) {
-            match controls.first() {
-                Some(first) => self.focus = first.target.clone(),
-                None => {
-                    self.overlay = None;
-                    self.today_motion = None;
-                    self.focus = Target::TodayCard;
-                    self.dirty = true;
-                    return true;
-                }
-            }
+            return false;
         }
         let first = controls.first().is_some_and(|c| c.target == self.focus);
         if first {
@@ -1749,6 +1832,12 @@ impl State {
 
     /// Hover and pointer-down must not move the control before pointer-up.
     pub fn pointer_focus(&mut self, target: Target) {
+        if matches!(target, Target::Sidebar(_) | Target::Nav(_))
+            && (self.remote_has_changes()
+                || matches!(self.subpage, Some(Subpage::Visual(edit)) if edit.prompt.is_some() || edit.draft != VisualPreferences::saved(&self.preferences)))
+        {
+            return;
+        }
         if self.evolution_active() {
             if let Target::EvolutionWidget(app) = target
                 && !self.evolution_widget_eligible(app)
@@ -1770,6 +1859,7 @@ impl State {
         if self.focus == target {
             return;
         }
+        self.local_wheel.intent = Some(local_wheel::Intent::Direct);
         if let Target::Sidebar(section) = target {
             if self.subpage == Some(Subpage::WeatherLocation) {
                 self.weather.cancel_search();
@@ -2263,17 +2353,8 @@ impl State {
     }
 
     fn close_subpage(&mut self) {
-        if let Some(Subpage::Dock {
-            confirming_restore, ..
-        }) = &mut self.subpage
-            && *confirming_restore
-        {
-            *confirming_restore = false;
-            self.focus = Target::DockRestore;
-            self.pointer = false;
-            self.dirty = true;
-            return;
-        }
+        self.motion_sample = None;
+        self.prompt_restore_focus = None;
         if self.subpage == Some(Subpage::WeatherLocation) {
             self.weather.cancel_search();
         }
@@ -2285,8 +2366,12 @@ impl State {
                 self.subpage = Some(Subpage::Navigation);
                 Target::Choice(2)
             }
-            Some(Subpage::Dock { .. }) => Target::Setting(DOCK_ROW),
-            Some(Subpage::Cinema { .. }) => Target::Setting(CINEMA_ROW),
+            Some(Subpage::PanelFocus) => {
+                self.subpage = Some(Subpage::Navigation);
+                Target::Choice(3)
+            }
+            Some(Subpage::MagicRemote { .. }) => Target::Setting(MAGIC_REMOTE_ROW),
+            Some(Subpage::Visual(edit)) => Target::Setting(edit.category.row()),
             Some(Subpage::About) => Target::Setting(ABOUT_ROW),
             Some(Subpage::AppNames) => Target::Setting(0),
             Some(Subpage::Greeting) => Target::Widget(0),
@@ -2337,71 +2422,165 @@ impl State {
         self.dirty = true;
     }
 
-    fn step_dock_scale(&mut self, increase: bool) {
-        if let Some(Subpage::Dock {
-            scale,
-            confirming_restore: false,
-            ..
-        }) = &mut self.subpage
+    fn step_visual(&mut self, field: VisualField, increase: bool) {
+        if let Some(Subpage::Visual(edit)) = &mut self.subpage
+            && edit.prompt.is_none()
+            && edit.category.fields().contains(&field)
         {
-            *scale = scale.stepped(increase);
+            let before = edit.draft;
+            edit.draft.adjust(field, increase);
+            if before != edit.draft && edit.category == VisualCategory::Animations {
+                self.motion_sample = Some(Instant::now());
+            }
             self.dirty = true;
         }
     }
 
-    fn step_dock_horizontal(&mut self, increase: bool) {
-        if let Some(Subpage::Dock {
-            horizontal,
-            confirming_restore: false,
-            ..
-        }) = &mut self.subpage
-        {
-            *horizontal = horizontal.stepped(increase);
-            self.dirty = true;
-        }
-    }
-
-    pub fn dock_settings_saved(&mut self, scale: DockScale, horizontal: DockHorizontal) {
-        self.preferences.evolution_home.cinema_dock_scale = scale;
-        self.preferences.evolution_home.dock_horizontal = horizontal;
+    pub fn visual_saved(&mut self, draft: VisualPreferences) {
+        draft.apply(&mut self.preferences);
         self.close_subpage();
+        self.notify(self.preferences.language.t("evolutionSaved"));
+    }
+
+    fn set_visual_prompt(&mut self, prompt: Option<VisualPrompt>) {
+        if let Some(Subpage::Visual(edit)) = &mut self.subpage {
+            if edit.prompt.is_none() {
+                self.prompt_restore_focus = Some(
+                    VisualField::from_target(&self.focus)
+                        .map_or_else(|| self.focus.clone(), VisualField::target),
+                );
+            }
+            edit.prompt = prompt;
+            self.focus = match prompt {
+                Some(VisualPrompt::Restore) => edit.category.action(VisualAction::Cancel),
+                Some(VisualPrompt::Unsaved) => edit.category.action(VisualAction::Continue),
+                None => self
+                    .prompt_restore_focus
+                    .take()
+                    .unwrap_or_else(|| edit.first()),
+            };
+            self.scroll = 0.;
+            self.local_wheel.intent = Some(local_wheel::Intent::Direct);
+            self.pointer = false;
+            self.dirty = true;
+        }
+    }
+
+    fn activate_visual(&mut self, action: VisualAction) -> Vec<Effect> {
+        let Some(Subpage::Visual(edit)) = self.subpage else {
+            return vec![];
+        };
+        if self.focus != edit.category.action(action)
+            || !edit.rows().iter().any(|(target, _)| *target == self.focus)
+        {
+            return vec![];
+        }
+        match action {
+            VisualAction::Apply if edit.draft != VisualPreferences::saved(&self.preferences) => {
+                return vec![Effect::SaveVisual(edit.draft)];
+            }
+            VisualAction::Apply | VisualAction::Discard => self.close_subpage(),
+            VisualAction::Cancel
+                if edit.category == VisualCategory::All || edit.prompt.is_none() =>
+            {
+                self.close_subpage()
+            }
+            VisualAction::Cancel | VisualAction::Continue => self.set_visual_prompt(None),
+            VisualAction::Restore => self.set_visual_prompt(Some(VisualPrompt::Restore)),
+            VisualAction::ConfirmRestore => {
+                if let Some(Subpage::Visual(edit)) = &mut self.subpage {
+                    edit.draft.restore(edit.category);
+                    if edit.category == VisualCategory::Animations {
+                        self.motion_sample = Some(Instant::now());
+                    }
+                    self.prompt_restore_focus = Some(edit.first());
+                }
+                self.set_visual_prompt(None);
+            }
+        }
+        vec![]
     }
 
     fn leave_subpage(&mut self) {
-        if let Some(Subpage::Cinema { scale, prompt }) = &mut self.subpage {
-            let (next_prompt, focus) = match *prompt {
-                Some(CinemaScalePrompt::Restore) => (None, Target::CinemaRestore),
-                Some(CinemaScalePrompt::Unsaved) => (None, Target::CinemaScale),
-                None if *scale != self.preferences.evolution_home.compact_cinema_scale => {
-                    (Some(CinemaScalePrompt::Unsaved), Target::CinemaContinue)
-                }
-                None => {
-                    self.close_subpage();
-                    return;
-                }
+        let changed = self.remote_has_changes();
+        if let Some(Subpage::MagicRemote {
+            confirming_exit, ..
+        }) = &mut self.subpage
+            && (changed || *confirming_exit)
+        {
+            *confirming_exit = !*confirming_exit;
+            self.local_wheel.intent = Some(local_wheel::Intent::Direct);
+            self.focus = if *confirming_exit {
+                Target::RemoteContinue
+            } else {
+                Target::RemoteTiming(Timing::Hold)
             };
-            *prompt = next_prompt;
-            self.focus = focus;
             self.pointer = false;
             self.dirty = true;
+            return;
+        }
+        if let Some(Subpage::Visual(edit)) = self.subpage {
+            match edit.prompt {
+                Some(VisualPrompt::Restore) if edit.category == VisualCategory::All => {
+                    self.close_subpage()
+                }
+                Some(_) => self.set_visual_prompt(None),
+                None if edit.draft != VisualPreferences::saved(&self.preferences) => {
+                    self.set_visual_prompt(Some(VisualPrompt::Unsaved))
+                }
+                None => self.close_subpage(),
+            }
             return;
         }
         self.close_subpage();
     }
 
-    fn step_cinema_scale(&mut self, increase: bool) {
-        if let Some(Subpage::Cinema {
-            scale,
-            prompt: None,
+    fn remote_has_changes(&self) -> bool {
+        matches!(self.subpage, Some(Subpage::MagicRemote { draft, .. })
+            if draft != RemoteSettings::saved(&self.preferences.evolution_home))
+    }
+
+    pub fn intercept_settings_exit(&mut self, target: &Target) -> bool {
+        if matches!(target, Target::Sidebar(_) | Target::Nav(_))
+            && let Some(Subpage::Visual(edit)) = self.subpage
+        {
+            if edit.prompt.is_none() && edit.draft != VisualPreferences::saved(&self.preferences) {
+                self.set_visual_prompt(Some(VisualPrompt::Unsaved));
+                return true;
+            }
+            if edit.prompt.is_some() {
+                return true;
+            }
+        }
+        if matches!(target, Target::Sidebar(_) | Target::Nav(_)) && self.remote_has_changes() {
+            if !matches!(
+                self.subpage,
+                Some(Subpage::MagicRemote {
+                    confirming_exit: true,
+                    ..
+                })
+            ) {
+                self.leave_subpage();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn step_remote_timing(&mut self, timing: Timing, increase: bool) {
+        if let Some(Subpage::MagicRemote {
+            draft,
+            confirming_exit: false,
         }) = &mut self.subpage
         {
-            *scale = scale.stepped(increase);
+            draft.step(timing, increase);
             self.dirty = true;
         }
     }
 
-    pub fn cinema_scale_saved(&mut self, scale: CinemaScale) {
-        self.preferences.evolution_home.compact_cinema_scale = scale;
+    pub fn remote_settings_saved(&mut self, draft: RemoteSettings) {
+        draft.apply(&mut self.preferences.evolution_home);
         self.close_subpage();
     }
 
@@ -2480,6 +2659,7 @@ impl State {
     }
 
     pub fn direction(&mut self, direction: Direction, controls: &[Control]) -> Vec<Effect> {
+        self.local_wheel.intent = Some(local_wheel::Intent::EnterPanel);
         self.evolution_discard_wheel();
         self.pointer = false;
         self.dirty = true;
@@ -2613,27 +2793,31 @@ impl State {
                     return vec![];
                 }
             }
-            if matches!(self.focus, Target::DockScale | Target::DockScaleStep(_))
-                && matches!(direction, Direction::Left | Direction::Right)
-            {
-                self.step_dock_scale(matches!(direction, Direction::Right));
-                self.focus = Target::DockScale;
-                return vec![];
-            }
-            if matches!(
-                self.focus,
-                Target::DockHorizontal | Target::DockHorizontalStep(_)
-            ) && matches!(direction, Direction::Left | Direction::Right)
-            {
-                self.step_dock_horizontal(matches!(direction, Direction::Right));
-                self.focus = Target::DockHorizontal;
-                return vec![];
-            }
-            if matches!(self.focus, Target::CinemaScale | Target::CinemaScaleStep(_))
-                && matches!(direction, Direction::Left | Direction::Right)
-            {
-                self.step_cinema_scale(matches!(direction, Direction::Right));
-                self.focus = Target::CinemaScale;
+            if let Some(Subpage::Visual(edit)) = self.subpage {
+                let field = VisualField::from_target(&self.focus);
+                if let Some(field) = field
+                    && edit.prompt.is_none()
+                    && edit.category.fields().contains(&field)
+                    && matches!(direction, Direction::Left | Direction::Right)
+                {
+                    self.step_visual(field, matches!(direction, Direction::Right));
+                    self.focus = field.target();
+                    return vec![];
+                }
+                let rows = edit.rows();
+                let focus = field.map_or_else(|| self.focus.clone(), VisualField::target);
+                let index = rows
+                    .iter()
+                    .position(|(target, _)| *target == focus)
+                    .unwrap_or(0);
+                match direction {
+                    Direction::Left => self.leave_subpage(),
+                    Direction::Up if index > 0 => self.focus(rows[index - 1].0.clone(), controls),
+                    Direction::Down if index + 1 < rows.len() => {
+                        self.focus(rows[index + 1].0.clone(), controls)
+                    }
+                    _ => {}
+                }
                 return vec![];
             }
             if matches!(self.focus, Target::WheelSteps | Target::WheelStepsStep(_))
@@ -2643,38 +2827,32 @@ impl State {
                 self.focus = Target::WheelSteps;
                 return vec![];
             }
+            if let Target::RemoteTiming(timing) | Target::RemoteTimingStep(timing, _) = self.focus
+                && matches!(direction, Direction::Left | Direction::Right)
+            {
+                self.step_remote_timing(timing, matches!(direction, Direction::Right));
+                self.focus = Target::RemoteTiming(timing);
+                return vec![];
+            }
             let setting_rows: Option<&[Target]> = match self.subpage {
                 Some(Subpage::Wheel { .. }) => {
                     Some(&[Target::WheelSteps, Target::WheelApply, Target::WheelCancel])
                 }
-                Some(Subpage::Dock {
-                    confirming_restore: true,
-                    ..
-                }) => Some(&[Target::DockConfirmRestore, Target::DockCancel]),
-                Some(Subpage::Dock { .. }) => Some(&[
-                    Target::DockScale,
-                    Target::DockHorizontal,
-                    Target::DockApply,
-                    Target::DockRestore,
-                    Target::DockCancel,
-                ]),
-                Some(Subpage::Cinema {
-                    prompt: Some(CinemaScalePrompt::Restore),
-                    ..
-                }) => Some(&[Target::CinemaConfirmRestore, Target::CinemaCancel]),
-                Some(Subpage::Cinema {
-                    prompt: Some(CinemaScalePrompt::Unsaved),
+                Some(Subpage::MagicRemote {
+                    confirming_exit: true,
                     ..
                 }) => Some(&[
-                    Target::CinemaApply,
-                    Target::CinemaDiscard,
-                    Target::CinemaContinue,
+                    Target::RemoteApply,
+                    Target::RemoteDiscard,
+                    Target::RemoteContinue,
                 ]),
-                Some(Subpage::Cinema { .. }) => Some(&[
-                    Target::CinemaScale,
-                    Target::CinemaApply,
-                    Target::CinemaRestore,
-                    Target::CinemaCancel,
+                Some(Subpage::MagicRemote { .. }) => Some(&[
+                    Target::RemoteTiming(Timing::Hold),
+                    Target::RemoteTiming(Timing::Hover),
+                    Target::RemoteTiming(Timing::Leave),
+                    Target::RemoteExpansion,
+                    Target::RemoteApply,
+                    Target::RemoteCancel,
                 ]),
                 Some(Subpage::Greeting) => Some(&[
                     Target::GreetingToggle,
@@ -2689,14 +2867,10 @@ impl State {
             if let Some(rows) = setting_rows
                 && let Some(index) = rows.iter().position(|target| {
                     *target == self.focus
-                        || (*target == Target::DockScale
-                            && matches!(self.focus, Target::DockScaleStep(_)))
-                        || (*target == Target::DockHorizontal
-                            && matches!(self.focus, Target::DockHorizontalStep(_)))
-                        || (*target == Target::CinemaScale
-                            && matches!(self.focus, Target::CinemaScaleStep(_)))
                         || (*target == Target::WheelSteps
                             && matches!(self.focus, Target::WheelStepsStep(_)))
+                        || matches!((target, &self.focus),
+                            (Target::RemoteTiming(row), Target::RemoteTimingStep(step, _)) if row == step)
                 })
             {
                 match direction {
@@ -2734,8 +2908,10 @@ impl State {
                         | Subpage::TimeFormat
                         | Subpage::Temperature
                         | Subpage::TextRendering
+                        | Subpage::PanelFocus
                         | Subpage::HomeTakeover,
                     ) => 2,
+                    Some(Subpage::Navigation) => 4,
                     Some(Subpage::Language) => Language::ALL.len(),
                     Some(Subpage::Appearance) => UiSize::ALL.len(),
                     Some(Subpage::DateFormat) => crate::model::DateFormat::ALL.len(),
@@ -2786,7 +2962,14 @@ impl State {
             }
             if let Target::Sidebar(index) = self.focus {
                 match direction {
-                    Direction::Right => self.focus(self.section_entry(), controls),
+                    Direction::Right => {
+                        if self.section != index {
+                            self.section = index;
+                            self.subpage = None;
+                            self.scroll = 0.;
+                        }
+                        self.focus(self.section_entry(), controls);
+                    }
                     Direction::Up => self.focus(
                         if index == 0 {
                             self.focus.clone()
@@ -2835,8 +3018,18 @@ impl State {
             }
             if matches!(
                 self.focus,
-                Target::Setting(0 | 1 | 4 | 7 | INTERFACE_SCALE_ROW | DOCK_ROW | CINEMA_ROW)
-                    | Target::Widget(_)
+                Target::Setting(
+                    0 | 1
+                        | 4
+                        | 7
+                        | INTERFACE_SCALE_ROW
+                        | DOCK_ROW
+                        | CINEMA_ROW
+                        | MAGIC_REMOTE_ROW
+                        | LAYOUT_ROW
+                        | ANIMATIONS_ROW
+                        | RESTORE_VISUAL_ROW
+                ) | Target::Widget(_)
                     | Target::InputMode(_)
                     | Target::WeatherLocation
                     | Target::WeatherTemperature
@@ -3195,6 +3388,34 @@ impl State {
         vec![]
     }
 
+    pub fn panel_animation_seconds(&self) -> f32 {
+        use crate::home_motion::{Motion, MotionPart, MotionProfile};
+        if self.evolution.is_some()
+            && matches!(
+                &self.overlay,
+                Some(Overlay::Options {
+                    restore: Target::App(_),
+                    ..
+                })
+            )
+        {
+            let motion = Motion::saved(&self.preferences);
+            return match motion.profile {
+                MotionProfile::Reduced | MotionProfile::None => {
+                    motion.duration(MotionPart::Backdrop)
+                }
+                _ => 0.12 * motion.duration(MotionPart::Backdrop) / 0.35,
+            };
+        }
+        if self.preferences.reduced_motion {
+            0.
+        } else if self.overlay.is_some() {
+            0.12
+        } else {
+            0.15
+        }
+    }
+
     pub fn options(&mut self) {
         if self.overlay.is_some() || self.moving.is_some() {
             return;
@@ -3234,9 +3455,7 @@ impl State {
                 restore: self.focus.clone(),
             });
             self.focus = Target::OpenApp;
-            if !self.preferences.reduced_motion {
-                self.panel_started = Some(Instant::now());
-            }
+            self.panel_started = (self.panel_animation_seconds() > 0.).then(Instant::now);
             self.dirty = true;
         }
     }
@@ -3297,6 +3516,18 @@ impl State {
     /// Holding OK opens the focused item's options; a Home app's include Move.
     pub fn hold(&mut self) {
         self.options();
+    }
+
+    pub fn app_press_eligible(&self, target: &Target) -> bool {
+        let Target::App(id) = target else {
+            return false;
+        };
+        self.overlay.is_none()
+            && !self.launching
+            && self.moving.is_none()
+            && !self.evolution_moving()
+            && matches!(self.page, Page::Home | Page::Apps)
+            && self.apps().iter().any(|app| &app.id == id)
     }
 
     pub fn text(&mut self, text: &str) {
@@ -3610,6 +3841,18 @@ impl State {
     }
 
     pub fn activate(&mut self) -> Vec<Effect> {
+        self.evolution_discard_wheel();
+        if self.intercept_settings_exit(&self.focus.clone()) {
+            return vec![];
+        }
+        if let Some(home) = &mut self.evolution {
+            home.cancel_hover();
+        }
+        self.local_wheel.intent = Some(if matches!(self.focus, Target::Sidebar(_)) {
+            local_wheel::Intent::EnterPanel
+        } else {
+            local_wheel::Intent::Direct
+        });
         if self.evolution_active() {
             if self.evolution_moving() {
                 return self.evolution_finish_move(true);
@@ -3621,15 +3864,16 @@ impl State {
                     return vec![];
                 }
                 Target::EvolutionContent(id) => {
-                    if let Some(index) = id.rsplit(':').next().and_then(|n| n.parse::<usize>().ok())
-                        && index < crate::home_evolution::CONTENTS.len()
-                    {
-                        let home = self.evolution.as_mut().unwrap();
-                        home.selected = home.first
-                            + (index as i64 - home.first)
-                                .rem_euclid(crate::home_evolution::CONTENTS.len() as i64);
-                        home.cancel_hover();
-                    }
+                    let count = self.evolution.as_ref().unwrap().title_count();
+                    let Some(index) = Self::evolution_content_index(id)
+                        .filter(|index| *index < count && self.evolution_has_cinema())
+                    else {
+                        return vec![];
+                    };
+                    let home = self.evolution.as_mut().unwrap();
+                    home.selected =
+                        home.first + (index as i64 - home.first).rem_euclid(count as i64);
+                    home.cancel_hover();
                     self.notice = Some((
                         "Conteúdo fictício do preview — sem reprodução ou serviço conectado".into(),
                         Instant::now(),
@@ -3698,8 +3942,15 @@ impl State {
                 self.pressed = None;
             }
             Target::TvSettings => return vec![Effect::Launch("com.palm.app.settings".into())],
-            Target::App(_) if self.page == Page::Apps && !self.launching => self.options(),
-            Target::App(id) | Target::Input(id) if !self.launching => {
+            Target::App(id)
+                if self.page == Page::Apps && self.preferences.custom_tile(&id).is_some() =>
+            {
+                self.options()
+            }
+            Target::App(id) if self.app_press_eligible(&Target::App(id.clone())) => {
+                return vec![Effect::Launch(id)];
+            }
+            Target::Input(id) if !self.launching => {
                 return vec![Effect::Launch(id)];
             }
             Target::MoveApp => {
@@ -4104,23 +4355,36 @@ impl State {
             }
             Target::Setting(index) => {
                 match index {
-                    DOCK_ROW if self.evolution.is_some() => {
-                        self.subpage = Some(Subpage::Dock {
-                            scale: self.preferences.evolution_home.cinema_dock_scale,
-                            horizontal: self.preferences.evolution_home.dock_horizontal,
-                            confirming_restore: false,
+                    MAGIC_REMOTE_ROW => {
+                        self.subpage = Some(Subpage::MagicRemote {
+                            draft: RemoteSettings::saved(&self.preferences.evolution_home),
+                            confirming_exit: false,
                         });
-                        self.focus = Target::DockScale;
+                        self.focus = Target::RemoteTiming(Timing::Hold);
                         self.scroll = 0.;
                         return vec![];
                     }
-                    CINEMA_ROW if self.evolution.is_some() => {
-                        self.subpage = Some(Subpage::Cinema {
-                            scale: self.preferences.evolution_home.compact_cinema_scale,
+                    DOCK_ROW | CINEMA_ROW | LAYOUT_ROW | ANIMATIONS_ROW | RESTORE_VISUAL_ROW
+                        if self.evolution.is_some() =>
+                    {
+                        let category = match index {
+                            DOCK_ROW => VisualCategory::Dock,
+                            CINEMA_ROW => VisualCategory::Cinema,
+                            LAYOUT_ROW => VisualCategory::Layout,
+                            ANIMATIONS_ROW => VisualCategory::Animations,
+                            _ => VisualCategory::All,
+                        };
+                        let edit = VisualEdit {
+                            category,
+                            draft: VisualPreferences::saved(&self.preferences),
                             prompt: None,
-                        });
-                        self.focus = Target::CinemaScale;
+                        };
+                        self.focus = edit.first();
+                        self.subpage = Some(Subpage::Visual(edit));
                         self.scroll = 0.;
+                        if category == VisualCategory::All {
+                            self.set_visual_prompt(Some(VisualPrompt::Restore));
+                        }
                         return vec![];
                     }
                     NAVIGATION_ROW if self.evolution.is_some() => {
@@ -4294,8 +4558,14 @@ impl State {
                     InputMode::Auto => 2,
                 });
             }
-            Target::DockScaleStep(increase) => self.step_dock_scale(increase),
-            Target::DockHorizontalStep(increase) => self.step_dock_horizontal(increase),
+            Target::DockScaleStep(increase) => self.step_visual(VisualField::DockScale, increase),
+            Target::DockHorizontalStep(increase) => {
+                self.step_visual(VisualField::DockHorizontal, increase)
+            }
+            Target::CinemaScaleStep(increase) => {
+                self.step_visual(VisualField::CinemaScale, increase)
+            }
+            Target::VisualStep(field, increase) => self.step_visual(field, increase),
             Target::WheelStepsStep(increase) => self.step_wheel_steps(increase),
             Target::WheelApply => {
                 if let Some(Subpage::Wheel { steps }) = self.subpage {
@@ -4305,81 +4575,52 @@ impl State {
             Target::WheelCancel if matches!(self.subpage, Some(Subpage::Wheel { .. })) => {
                 self.close_subpage();
             }
-            Target::DockApply => {
-                if let Some(Subpage::Dock {
-                    scale,
-                    horizontal,
-                    confirming_restore: false,
-                }) = self.subpage
-                {
-                    return vec![Effect::SaveDockSettings { scale, horizontal }];
-                }
-            }
-            Target::DockRestore => {
-                if let Some(Subpage::Dock {
-                    confirming_restore, ..
+            Target::RemoteTimingStep(timing, increase) => self.step_remote_timing(timing, increase),
+            Target::RemoteExpansion => {
+                if let Some(Subpage::MagicRemote {
+                    draft,
+                    confirming_exit: false,
                 }) = &mut self.subpage
                 {
-                    *confirming_restore = true;
-                    self.focus = Target::DockCancel;
-                    self.pointer = false;
+                    draft.pointer_expands = !draft.pointer_expands;
                 }
             }
-            Target::DockConfirmRestore => {
-                if let Some(Subpage::Dock {
-                    scale,
-                    confirming_restore,
-                    ..
-                }) = &mut self.subpage
-                    && *confirming_restore
-                {
-                    *scale = DockScale::default();
-                    *confirming_restore = false;
-                    self.focus = Target::DockScale;
-                    self.pointer = false;
+            Target::RemoteApply => {
+                if let Some(Subpage::MagicRemote { draft, .. }) = self.subpage {
+                    return vec![Effect::SaveMagicRemote(draft)];
                 }
             }
-            Target::DockCancel if matches!(self.subpage, Some(Subpage::Dock { .. })) => {
-                self.close_subpage();
-            }
-            Target::CinemaScaleStep(increase) => self.step_cinema_scale(increase),
-            Target::CinemaApply => {
-                if let Some(Subpage::Cinema { scale, prompt }) = self.subpage
-                    && prompt != Some(CinemaScalePrompt::Restore)
-                {
-                    return vec![Effect::SaveCinemaScale(scale)];
-                }
-            }
-            Target::CinemaRestore => {
-                if let Some(Subpage::Cinema { prompt, .. }) = &mut self.subpage {
-                    *prompt = Some(CinemaScalePrompt::Restore);
-                    self.focus = Target::CinemaCancel;
-                    self.pointer = false;
-                }
-            }
-            Target::CinemaConfirmRestore => {
-                if let Some(Subpage::Cinema { scale, prompt }) = &mut self.subpage
-                    && *prompt == Some(CinemaScalePrompt::Restore)
-                {
-                    *scale = CinemaScale::default();
-                    *prompt = None;
-                    self.focus = Target::CinemaScale;
-                    self.pointer = false;
-                }
-            }
-            Target::CinemaCancel
-                if matches!(self.subpage, Some(Subpage::Cinema { prompt: None, .. })) =>
+            Target::RemoteCancel | Target::RemoteDiscard
+                if matches!(self.subpage, Some(Subpage::MagicRemote { .. })) =>
             {
-                self.close_subpage();
+                self.close_subpage()
             }
-            Target::CinemaCancel | Target::CinemaContinue
-                if matches!(self.subpage, Some(Subpage::Cinema { .. })) =>
+            Target::RemoteContinue
+                if matches!(
+                    self.subpage,
+                    Some(Subpage::MagicRemote {
+                        confirming_exit: true,
+                        ..
+                    })
+                ) =>
             {
-                self.leave_subpage();
+                self.leave_subpage()
             }
-            Target::CinemaDiscard if matches!(self.subpage, Some(Subpage::Cinema { .. })) => {
-                self.close_subpage();
+            Target::DockApply | Target::CinemaApply => {
+                return self.activate_visual(VisualAction::Apply);
             }
+            Target::DockRestore | Target::CinemaRestore => {
+                return self.activate_visual(VisualAction::Restore);
+            }
+            Target::DockConfirmRestore | Target::CinemaConfirmRestore => {
+                return self.activate_visual(VisualAction::ConfirmRestore);
+            }
+            Target::DockCancel | Target::CinemaCancel => {
+                return self.activate_visual(VisualAction::Cancel);
+            }
+            Target::CinemaContinue => return self.activate_visual(VisualAction::Continue),
+            Target::CinemaDiscard => return self.activate_visual(VisualAction::Discard),
+            Target::VisualAction(action) => return self.activate_visual(action),
             Target::Choice(index) => {
                 match self.subpage.clone() {
                     Some(Subpage::Navigation) if index == 2 => {
@@ -4390,9 +4631,35 @@ impl State {
                         self.scroll = 0.;
                         return vec![];
                     }
+                    Some(Subpage::Navigation) if index == 3 => {
+                        self.subpage = Some(Subpage::PanelFocus);
+                        self.focus = Target::Choice(usize::from(
+                            self.preferences.evolution_home.panel_focus == PanelFocusMode::First,
+                        ));
+                        self.scroll = 0.;
+                        return vec![];
+                    }
                     Some(Subpage::Navigation) => {
-                        self.preferences.evolution_home.global_position =
-                            crate::home_evolution::GlobalPosition::ALL[index.min(1)];
+                        let mut draft = VisualPreferences::saved(&self.preferences);
+                        draft.set_global_position(
+                            crate::home_evolution::GlobalPosition::ALL[index.min(1)],
+                        );
+                        let edit = VisualEdit {
+                            category: VisualCategory::Shortcuts,
+                            draft,
+                            prompt: None,
+                        };
+                        self.focus = edit.first();
+                        self.subpage = Some(Subpage::Visual(edit));
+                        self.scroll = 0.;
+                        return vec![];
+                    }
+                    Some(Subpage::PanelFocus) => {
+                        self.preferences.evolution_home.panel_focus = if index == 0 {
+                            PanelFocusMode::Restore
+                        } else {
+                            PanelFocusMode::First
+                        };
                     }
                     Some(Subpage::ClockFormat) => self.preferences.hour_24 = index == 1,
                     Some(Subpage::TimeFormat) => self.preferences.show_seconds = index == 1,
@@ -4466,8 +4733,8 @@ impl State {
                         | Subpage::Shortcuts
                         | Subpage::Inputs
                         | Subpage::Wheel { .. }
-                        | Subpage::Dock { .. }
-                        | Subpage::Cinema { .. }
+                        | Subpage::MagicRemote { .. }
+                        | Subpage::Visual(_)
                         | Subpage::Crypto,
                     ) => {
                         return vec![];
@@ -4621,6 +4888,10 @@ impl State {
     }
 
     pub fn back(&mut self) -> Vec<Effect> {
+        if let Some(home) = &mut self.evolution {
+            home.cancel_hover();
+        }
+        self.local_wheel.intent = Some(local_wheel::Intent::Direct);
         self.evolution_discard_wheel();
         self.pointer = false;
         self.dirty = true;
