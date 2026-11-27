@@ -34,6 +34,20 @@ is the Rust executable `luma`, with app ID `com.davidsantana.lumaevolution`. The
 native executable and served temporarily to the owner's phone or computer; they do not render the
 TV interface.
 
+The normal webOS launch uses Evolution Home with the platform inventory, system clock and the
+installation's preferences. Cinema is hidden until a real catalog is available. The weather
+summary uses the existing service for a configured location, and the expanded forecast shows
+an unavailable state. Calendar and weather remain informational until corresponding app routes
+are verified. The desktop preview keeps its separate preferences and fictional content.
+
+On webOS and in the Evolution Home desktop preview, the original side menu has no actions or
+focus targets on any page. Back retains the current settings hierarchy. The Home key returns to
+Evolution Home, with the existing confirmation for unsaved settings.
+
+CS2 Scores and Crypto remain in the original desktop compatibility harness. Evolution omits
+their settings and Today content and starts neither service. Old preferences for these widgets
+still load and round-trip through the settings file.
+
 The Evolution Home desktop preview runs with `pnpm dev --home-preview` using the native renderer,
 isolated preferences and labeled fictional content. Interface → Navigation moves All Apps and
 Luma Evolution Settings between the top and Dock. Hold OK on a Dock action to move it.
@@ -1038,7 +1052,8 @@ and weather labels. App/device names and saved city names remain real data. No g
 runtime font/translation services or telemetry are used. Weather attribution: Open-Meteo,
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 
-**Widgets → Crypto** (off by default) shows up to 20 coins with their US-dollar price and
+In the original desktop compatibility harness, **Widgets → Crypto** (off by default) shows up
+to 20 coins with their US-dollar price and
 24-hour change, as a line of the Today card and nowhere else. BTC, ETH, SOL, BNB, XRP, ADA, DOGE
 and TON are listed; **Find a coin** searches every coin Binance trades against USDT (its
 `ticker/price` list, loaded once on its own worker when the search first opens, up to 1 MiB),
@@ -1114,7 +1129,8 @@ payload. Its shell scripts require LF and pass `sh -n` on the same bytes checked
 
 ## CS2 Scores
 
-**Widgets → CS2 Scores** (off by default) shows Counter-Strike 2 matches below the inputs: live
+In the original desktop compatibility harness, **Widgets → CS2 Scores** (off by default) shows
+Counter-Strike 2 matches below the inputs: live
 ones first, the biggest events at the front, then those that ended in the last 30 minutes, then
 upcoming ones, up to twelve, three cards at a time. Left
 and Right step through them and scroll the row ("4–6 / 12" in its header); Down from a favorite

@@ -563,8 +563,13 @@ impl Preferences {
     /// The widget in the middle of Home: the first shown outside Today, CS2, then shows. Rows
     /// saved before the center existed can leave both outside; the other goes into Today.
     pub fn center(&self) -> Option<Center> {
-        [Center::Cs2, Center::Shows, Center::Apps]
-            .into_iter()
+        self.center_among(&[Center::Cs2, Center::Shows, Center::Apps])
+    }
+
+    pub(crate) fn center_among(&self, widgets: &[Center]) -> Option<Center> {
+        widgets
+            .iter()
+            .copied()
             .find(|&widget| self.shown(widget) && !self.placed_in_today(widget))
     }
 
@@ -581,13 +586,17 @@ impl Preferences {
     /// Puts `widget` in the middle of Home, or back into Today; the one it replaces moves
     /// into Today.
     pub fn place_in_center(&mut self, widget: Center, center: bool) {
-        if center && let Some(previous) = self.center() {
+        self.set_center(widget, center, self.center());
+    }
+
+    pub(crate) fn set_center(&mut self, widget: Center, center: bool, previous: Option<Center>) {
+        if center && let Some(previous) = previous {
             self.set_in_today(previous, true);
         }
         self.set_in_today(widget, !center);
     }
 
-    fn shown(&self, widget: Center) -> bool {
+    pub(crate) fn shown(&self, widget: Center) -> bool {
         match widget {
             Center::Cs2 => self.show_cs2,
             Center::Shows => self.show_shows,

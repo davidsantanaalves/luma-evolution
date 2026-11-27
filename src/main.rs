@@ -926,8 +926,11 @@ fn input_refresh_active(state: &State, webos: bool, focused: bool, visible: bool
 
 /// True when a renamed place needs the preferences saved.
 fn weather_tick(state: &mut State, service: &weather_service::Service, visible: bool) -> bool {
-    // Stage 01 renders a reservation, not a forecast. Hidden widgets never start HTTP.
-    let visible = visible && state.evolution.is_none();
+    let visible = visible
+        && state
+            .evolution
+            .as_ref()
+            .is_none_or(|home| !home.is_preview() && state.preferences.evolution_home.show_top);
     let mut save = false;
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let (command, changed) = state.weather.sync(
@@ -962,9 +965,26 @@ fn weather_tick(state: &mut State, service: &weather_service::Service, visible: 
     save
 }
 
+struct LegacyWidgetServices {
+    cs2: cs2_service::Service,
+    crypto: crypto_service::Service,
+}
+
+impl LegacyWidgetServices {
+    fn start(state: &State, options: &Options) -> Result<Option<Self>, String> {
+        if !state.legacy_widgets_enabled() {
+            return Ok(None);
+        }
+        let cs2 = cs2_service::Client::new(options.cs2_test_server.as_deref())?;
+        let crypto = crypto_service::Client::new(options.crypto_test_server.as_deref())?;
+        Ok(Some(Self {
+            cs2: cs2_service::Service::new(cs2),
+            crypto: crypto_service::Service::new(crypto),
+        }))
+    }
+}
+
 fn crypto_tick(state: &mut State, service: &crypto_service::Service, visible: bool) {
-    let visible = visible
-        && (state.evolution.is_none() || matches!(state.overlay, Some(Overlay::Today { .. })));
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let (command, changed) = state.crypto.sync(
         state.preferences.show_crypto,
@@ -1196,10 +1216,7 @@ fn app_cards_tick(state: &mut State, service: &app_cards_service::Service, visib
     }
 }
 
-/// The country whose TV schedule joins the streaming one, from the UI language.
 fn cs2_tick(state: &mut State, service: &cs2_service::Service, visible: bool) {
-    let visible = visible
-        && (state.evolution.is_none() || matches!(state.overlay, Some(Overlay::Today { .. })));
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let (command, changed) = state.cs2.sync(
         state.preferences.show_cs2,
@@ -1482,8 +1499,8 @@ fn run() -> Result<(), String> {
         options.script.is_empty() && options.test_update_version.is_none() && !options.home_preview;
     let public_update_checks = update::SELF_UPDATE_ENABLED && interactive_run;
     let mut state = State::new(initial_preferences);
+    state.evolution = home_evolution::Home::for_launch(webos, options.home_preview);
     if options.home_preview {
-        state.evolution = Some(home_evolution::Home::default());
         eprintln!(
             "Luma Evolution: native Home preview; fictional content; isolated preferences: {}",
             preferences_path.display()
@@ -1540,9 +1557,6 @@ fn run() -> Result<(), String> {
     if webos && options.crypto_test_server.is_some() {
         return Err("Crypto test servers are only available in desktop builds".into());
     }
-    let crypto_service = crypto_service::Service::new(crypto_service::Client::new(
-        options.crypto_test_server.as_deref(),
-    )?);
     let weather_cache = weather_service::cache_path(&preferences_path);
     state.weather.cache = weather_service::load_cache(&weather_cache);
     let weather_service = weather_service::Service::new(
@@ -1552,9 +1566,7 @@ fn run() -> Result<(), String> {
     if webos && options.cs2_test_server.is_some() {
         return Err("CS2 test servers are only available in desktop builds".into());
     }
-    let cs2_service = cs2_service::Service::new(cs2_service::Client::new(
-        options.cs2_test_server.as_deref(),
-    )?);
+    let legacy_widgets = LegacyWidgetServices::start(&state, &options)?;
     let shows_service = shows_service::Service::new(shows_service::Client::new());
     let cub_service = cub_service::Service::new(cub_service::Client::new());
     let app_cards_service = app_cards_service::Service::new(webos);
@@ -2163,7 +2175,10 @@ fn run() -> Result<(), String> {
             };
             state.notify(state.preferences.language.format(key, &[("tile", &title)]));
         }
-        cs2_tick(&mut state, &cs2_service, visible);
+        if let Some(services) = &legacy_widgets {
+            cs2_tick(&mut state, &services.cs2, visible);
+            crypto_tick(&mut state, &services.crypto, visible);
+        }
         shows_tick(&mut state, &shows_service, visible, local_offset);
         cub_tick(&mut state, &cub_service, &cub_path, visible, local_offset);
         app_cards_tick(&mut state, &app_cards_service, visible);
@@ -2179,7 +2194,6 @@ fn run() -> Result<(), String> {
                 &updates,
             );
         }
-        crypto_tick(&mut state, &crypto_service, visible);
         if std::mem::take(&mut state.update_check_requested) {
             if let Some(version) = &options.test_update_version {
                 state.update_response(Ok(
@@ -2708,13 +2722,12 @@ fn run() -> Result<(), String> {
             })
             && let Some(action) = options.script.pop_front()
         {
-            if action == "preview-motion-capture" && state.evolution.is_some() {
+            if action == "preview-motion-capture" && options.home_preview {
                 options.frames = Some(frame + 1);
-            } else if action == "preview-finish" && state.evolution.is_some() {
+            } else if action == "preview-finish" && options.home_preview {
                 options.frames = Some(frame + 12);
             } else if matches!(action.as_str(), "preview-click-dock" | "preview-press-dock")
-                && state.evolution.is_some()
-                && !cfg!(feature = "webos")
+                && options.home_preview
             {
                 if let Some(control) = scene
                     .controls
@@ -2729,10 +2742,7 @@ fn run() -> Result<(), String> {
                         scripted_click(&sdl, &window, &position)?;
                     }
                 }
-            } else if action == "preview-release-dock"
-                && state.evolution.is_some()
-                && !cfg!(feature = "webos")
-            {
+            } else if action == "preview-release-dock" && options.home_preview {
                 scripted_button(&sdl, &window, "0:0", false)?;
             } else if let Some(position) = action.strip_prefix("click:") {
                 scripted_click(&sdl, &window, position)?;
@@ -2830,7 +2840,10 @@ fn run() -> Result<(), String> {
         if input_refresh.due(Instant::now(), inputs_active) {
             platform.send(Request::RefreshInputs);
         }
-        cs2_tick(&mut state, &cs2_service, visible);
+        if let Some(services) = &legacy_widgets {
+            cs2_tick(&mut state, &services.cs2, visible);
+            crypto_tick(&mut state, &services.crypto, visible);
+        }
         shows_tick(&mut state, &shows_service, visible, local_offset);
         cub_tick(&mut state, &cub_service, &cub_path, visible, local_offset);
         app_cards_tick(&mut state, &app_cards_service, visible);
@@ -2846,7 +2859,6 @@ fn run() -> Result<(), String> {
                 &updates,
             );
         }
-        crypto_tick(&mut state, &crypto_service, visible);
         // SDL-webOS disables text input when its own panel is dismissed, even
         // if it did not forward a Back/Return key to the application.
         if text_active

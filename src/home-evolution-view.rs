@@ -742,7 +742,15 @@ fn inputs(
         single_line(
             out,
             assets,
-            language.t("evolutionInputDemo"),
+            &if state.evolution.as_ref().unwrap().is_preview() {
+                language.t("evolutionInputDemo").to_owned()
+            } else {
+                input_status(
+                    input,
+                    state.preferences.input_name(input).is_some(),
+                    language,
+                )
+            },
             Rect::new(rect.x + 53., rect.y + 30., rect.w - 65., 21.),
             text(14., 450, 0.),
             false,
@@ -792,7 +800,11 @@ pub fn render(out: &mut Scene, state: &State, assets: &Assets, now: OffsetDateTi
     out.draw.push(Draw::EdgeFade(None));
     out.draw.push(Draw::EdgeFadeX(None));
     out.text(
-        "LUMA EVOLUTION  /  PREVIEW NATIVO",
+        if home.is_preview() {
+            "LUMA EVOLUTION  /  PREVIEW NATIVO"
+        } else {
+            "LUMA EVOLUTION"
+        },
         Rect::new(80., 34., 840., 27.),
         text(17., 650, 0.06).shadow(),
         WHITE,

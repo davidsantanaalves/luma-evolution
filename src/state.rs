@@ -963,9 +963,12 @@ impl State {
         pending
     }
 
-    /// Home with Luma in front: the menu opens over the page, and Home again closes it.
+    /// Home returns to the Evolution Home or toggles the original desktop menu.
     pub fn home_key(&mut self) -> Vec<Effect> {
-        if self.evolution.is_some() && self.page == Page::Home {
+        if self.evolution.is_some() {
+            if self.intercept_settings_exit(&Target::Nav(0)) {
+                return vec![];
+            }
             return self.return_home();
         }
         if matches!(self.overlay, Some(Overlay::Menu { .. })) {
@@ -1024,7 +1027,7 @@ impl State {
 
     /// The menu over the page, on the page's own item; closing it returns to the focus it had.
     pub fn open_menu(&mut self) {
-        if self.evolution.is_some() && self.page == Page::Home {
+        if self.evolution.is_some() {
             return;
         }
         let amount = self.menu_amount();
@@ -1151,6 +1154,9 @@ impl State {
 
     /// The menu's items from the top: the pages, the inputs while unfolded, then Settings.
     pub fn menu_items(&self) -> Vec<Target> {
+        if self.evolution.is_some() {
+            return vec![];
+        }
         let mut items = vec![Target::Nav(0), Target::Nav(1), Target::MenuInputs];
         if self.menu_inputs {
             items.extend(
@@ -3841,6 +3847,28 @@ impl State {
     }
 
     pub fn activate(&mut self) -> Vec<Effect> {
+        if !self.legacy_widgets_enabled()
+            && matches!(
+                self.focus,
+                Target::Widget(5 | 6)
+                    | Target::CryptoToggle
+                    | Target::CryptoSearch
+                    | Target::CryptoResult(_)
+                    | Target::CryptoCoin(_)
+                    | Target::Coin(_)
+                    | Target::Cs2Toggle
+                    | Target::Cs2Layout
+                    | Target::Cs2Major
+                    | Target::Cs2Results
+                    | Target::Cs2Match(_)
+                    | Target::Cs2Close
+                    | Target::Cs2Stream(_)
+                    | Target::TodayMatch(_)
+                    | Target::TodayTab(crate::today::Tab::Cs2 | crate::today::Tab::Crypto)
+            )
+        {
+            return vec![];
+        }
         self.evolution_discard_wheel();
         if self.intercept_settings_exit(&self.focus.clone()) {
             return vec![];
@@ -4214,8 +4242,13 @@ impl State {
                     _ => Center::Shows,
                 };
                 self.shows_first = 0;
-                let center = self.preferences.center() != Some(widget);
-                self.preferences.place_in_center(widget, center);
+                let previous = self.widget_center();
+                let center = previous != Some(widget);
+                if self.legacy_widgets_enabled() {
+                    self.preferences.place_in_center(widget, center);
+                } else {
+                    self.preferences.set_center(widget, center, previous);
+                }
                 return vec![Effect::Save];
             }
             Target::CryptoSearch => self.open_keyboard(TextField::Coin),

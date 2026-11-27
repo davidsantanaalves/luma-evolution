@@ -5,9 +5,106 @@ use crate::home_evolution::{
 use crate::i18n::Language;
 use std::time::{Duration, Instant};
 
+#[test]
+fn t02c_webos_home_uses_the_inventory_and_keeps_unavailable_regions_in_preferences() {
+    use crate::{
+        home_evolution::{CONTENTS, WeatherFixture},
+        model::{App, Input, Inventory},
+        renderer::Draw,
+        view,
+    };
+
+    assert!(Home::for_launch(false, false).is_none());
+    let preview = Home::for_launch(false, true).unwrap();
+    assert!(preview.is_preview());
+    assert_eq!(preview.title_count(), CONTENTS.len());
+
+    let mut state = State::new(Preferences {
+        language: Language::En,
+        favorites: Some(vec![
+            "com.example.second".into(),
+            "com.example.absent".into(),
+            "com.example.first".into(),
+        ]),
+        show_weather: true,
+        ..Preferences::default()
+    });
+    let saved = serde_json::to_vec(&state.preferences).unwrap();
+    state.evolution = Home::for_launch(true, false);
+    state.open(0);
+    let home = state.evolution.as_ref().unwrap();
+    assert!(!home.is_preview());
+    assert_eq!(home.title_count(), 0);
+    assert_eq!(home.weather_fixture, WeatherFixture::None);
+    assert!(!state.evolution_has_cinema());
+    assert!(!state.evolution_widget_eligible(WidgetApp::Calendar));
+    assert!(!state.evolution_widget_eligible(WidgetApp::Weather));
+    assert!(state.evolution_dock_items().is_empty());
+    assert!(state.evolution_inputs().is_empty());
+
+    let input = Input {
+        id: "com.webos.app.hdmi1".into(),
+        title: "Console".into(),
+        port: "HDMI 1".into(),
+        connected: Some(true),
+        signal: Some(true),
+    };
+    state.set_inventory(
+        Inventory {
+            apps: vec![
+                App::new("com.example.first", "First"),
+                App::new("com.example.second", "Second"),
+            ],
+            inputs: vec![input.clone()],
+        },
+        None,
+    );
+    let second = Target::App("com.example.second".into());
+    assert_eq!(
+        state.evolution_dock_items(),
+        vec![second.clone(), Target::App("com.example.first".into())]
+    );
+    assert_eq!(state.evolution_inputs(), vec![&input]);
+    assert_eq!(state.evolution_geometry().cinema_card_height, 0.);
+    state.evolution_focus_dock(second.clone());
+    assert_eq!(
+        state.activate(),
+        vec![Effect::Launch("com.example.second".into())]
+    );
+    assert_eq!(serde_json::to_vec(&state.preferences).unwrap(), saved);
+
+    let assets = view::Assets {
+        root: std::path::PathBuf::new(),
+        version: "test".into(),
+        metrics: Default::default(),
+        artwork: crate::app_artwork::Service::new(false),
+    };
+    let scene = view::scene(&state, &assets, time::OffsetDateTime::UNIX_EPOCH);
+    let has_text = |needle: &str| {
+        scene.draw.iter().any(|draw| match draw {
+            Draw::Text(value, ..) => value.contains(needle),
+            _ => false,
+        })
+    };
+    assert!(has_text("LUMA EVOLUTION"));
+    assert!(has_text(Language::En.t("weatherUnavailable")));
+    assert!(!has_text("PREVIEW NATIVO"));
+    assert!(!has_text(CONTENTS[0].1));
+    assert!(
+        scene
+            .controls
+            .iter()
+            .any(|control| control.target == second)
+    );
+    assert!(!scene.controls.iter().any(|control| matches!(
+        control.target,
+        Target::EvolutionContent(_) | Target::EvolutionWidget(_)
+    )));
+}
+
 fn preview() -> State {
     let mut state = ready();
-    state.evolution = Some(Home::default());
+    state.evolution = Some(Home::preview());
     state.open(0);
     state
 }
@@ -24,7 +121,7 @@ fn p02_preview() -> (State, Vec<String>) {
         favorites: Some(ids.clone()),
         ..Preferences::default()
     });
-    state.evolution = Some(Home::default());
+    state.evolution = Some(Home::preview());
     state.set_inventory(inventory, None);
     state.open(0);
     (state, ids)
@@ -157,7 +254,7 @@ fn p02_new_dock_session_loads_order_without_loading_focus() {
     assert_eq!(state.focus, Target::App(ids[9].clone()));
     let disk = serde_json::to_string(&state.preferences).unwrap();
     let mut fresh = State::new(serde_json::from_str(&disk).unwrap());
-    fresh.evolution = Some(Home::default());
+    fresh.evolution = Some(Home::preview());
     fresh.set_inventory(state.inventory, None);
     fresh.open(0);
     assert_eq!(fresh.focus, Target::App(ids[1].clone()));
@@ -745,6 +842,129 @@ fn evolution_home_never_opens_the_inherited_side_menu() {
     assert_eq!(state.focus, Target::EvolutionGlobal(GlobalAction::Apps));
     state.activate();
     assert_eq!(state.page, Page::Apps);
+}
+
+#[test]
+fn t02c_acceptance_sidebar_stops_at_the_edge_on_all_evolution_pages() {
+    for mut state in [preview(), ready()] {
+        if state.evolution.is_none() {
+            state.evolution = Home::for_launch(true, false);
+        }
+        for position in [GlobalPosition::Top, GlobalPosition::Dock] {
+            state.preferences.evolution_home.global_position = position;
+            state.open(0);
+            for (action, page) in [
+                (GlobalAction::Apps, Page::Apps),
+                (GlobalAction::Settings, Page::Settings),
+            ] {
+                let target = Target::EvolutionGlobal(action);
+                let drawn = controls(&state);
+                assert!(drawn.iter().any(|control| control.target == target));
+                state.focus(target.clone(), &drawn);
+                assert!(state.activate().is_empty());
+                assert_eq!(state.page, page);
+                let focus = state.focus.clone();
+                for _ in 0..3 {
+                    assert!(
+                        state
+                            .direction(Direction::Left, &controls(&state))
+                            .is_empty()
+                    );
+                }
+                state.open_menu();
+                assert_eq!(state.focus, focus);
+                assert!(state.overlay.is_none() && state.menu_motion.is_none());
+                assert!(state.menu_items().is_empty());
+                let drawn = controls(&state);
+                assert!(
+                    !drawn.iter().any(|control| matches!(
+                        control.target,
+                        Target::MenuInputs | Target::Nav(_)
+                    ))
+                );
+                assert_eq!(state.hit_test(&drawn, 0., 500.), None);
+                state.wheel_scroll(&drawn, Some((0., 500.)), 0, 1);
+                assert!(state.overlay.is_none());
+                state.back();
+                assert_eq!(state.page, Page::Home);
+                assert_eq!(state.focus, target);
+            }
+        }
+
+        state.open(2);
+        state.focus(
+            Target::Sidebar(crate::state::WIDGETS_SECTION),
+            &controls(&state),
+        );
+        state.focus(Target::Widget(1), &controls(&state));
+        state.activate();
+        assert_eq!(state.subpage, Some(crate::state::Subpage::Weather));
+        state.open_menu();
+        assert!(state.overlay.is_none());
+        state.back();
+        assert_eq!(state.focus, Target::Widget(1));
+        state.home_key();
+        assert_eq!(state.page, Page::Home);
+        assert!(state.overlay.is_none());
+    }
+}
+
+#[test]
+fn t02c_acceptance_legacy_preferences_do_not_enable_widgets_or_workers() {
+    use crate::{LegacyWidgetServices, Options, model::Center, today};
+
+    for webos in [true, false] {
+        let prefs: Preferences = serde_json::from_str(
+            r#"{"show_cs2":true,"cs2_today":false,"show_crypto":true,"crypto_coins":["BTC"],"show_shows":false,"show_apps":false}"#,
+        )
+        .unwrap();
+        let mut state = State::new(prefs);
+        state.evolution = Home::for_launch(webos, !webos);
+        let saved = serde_json::to_value(&state.preferences).unwrap();
+        // Invalid origins would fail client construction if startup got past the capability gate.
+        let options = Options {
+            cs2_test_server: Some("unused".into()),
+            crypto_test_server: Some("unused".into()),
+            ..Options::default()
+        };
+        assert!(
+            LegacyWidgetServices::start(&state, &options)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!state.evolution_top_targets().contains(&Target::TodayCard));
+        assert!(!state.evolution_widget_in_today(Center::Cs2));
+        assert_eq!(state.widget_center(), None);
+        let now = time::OffsetDateTime::UNIX_EPOCH;
+        assert!(today::tabs(&state, 0, now.date()).is_empty());
+        assert!(today::today(&state, 0, now.date()).lines.is_empty());
+
+        state.open(2);
+        state.focus(
+            Target::Sidebar(crate::state::WIDGETS_SECTION),
+            &controls(&state),
+        );
+        let drawn = controls(&state);
+        for index in [0, 1, 2, 3, 4, 7, 8] {
+            assert!(drawn.iter().any(|c| c.target == Target::Widget(index)));
+        }
+        for index in [5, 6] {
+            let target = Target::Widget(index);
+            assert!(!drawn.iter().any(|c| c.target == target));
+            state.focus = target;
+            assert!(state.activate().is_empty());
+            assert!(state.subpage.is_none());
+        }
+        assert_eq!(serde_json::to_value(&state.preferences).unwrap(), saved);
+
+        state.preferences.show_shows = true;
+        state.focus = Target::ShowsLayout;
+        assert_eq!(state.activate(), vec![Effect::Save]);
+        assert_eq!(state.widget_center(), Some(Center::Shows));
+        assert!(state.evolution_top_targets().contains(&Target::TodayCard));
+        assert!(!state.preferences.cs2_today);
+        assert!(state.preferences.show_cs2 && state.preferences.show_crypto);
+    }
 }
 
 #[test]
@@ -1812,7 +2032,7 @@ fn p06_rotation_catalog_pause_and_title_count() {
     }
     for count in [0, 1, 2, 8] {
         let mut state = preview();
-        state.evolution.as_mut().unwrap().catalog_len = Some(count);
+        state.evolution.as_mut().unwrap().preview_catalog_len = Some(count);
         let now = Instant::now();
         state.evolution_tick_at(0.1, now);
         state.evolution_tick_at(0.1, now + Duration::from_secs(10));
@@ -1926,7 +2146,7 @@ fn cinema_focus_pointer_disabled_rotation_and_small_catalogs_never_advance() {
     assert_eq!(state.evolution.as_ref().unwrap().rotation.advances, 0);
     for count in [0, 1] {
         state.evolution_focus_dock(state.evolution_dock());
-        state.evolution.as_mut().unwrap().catalog_len = Some(count);
+        state.evolution.as_mut().unwrap().preview_catalog_len = Some(count);
         state.evolution.as_mut().unwrap().pointer_in_cinema = false;
         state.evolution_tick(0.1);
         assert!(state.evolution.as_ref().unwrap().rotation.paused);

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 fn preview() -> State {
     let mut state = State::new(Preferences::default());
-    state.evolution = Some(Home::default());
+    state.evolution = Some(Home::preview());
     state.set_inventory(demo_inventory(), None);
     state.open(0);
     state.preferences.evolution_home.rotation_enabled = false;

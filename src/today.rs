@@ -196,7 +196,7 @@ pub fn tabs(state: &State, now: i64, date: Date) -> Vec<(Tab, Sections)> {
             .collect();
         tabs.push((Tab::Shows, vec![(Section::Episodes, episodes)]));
     }
-    if preferences.crypto_in_today() {
+    if state.crypto_in_today() {
         tabs.push((Tab::Crypto, vec![(Section::Prices, vec![Line::Crypto])]));
     }
     tabs.push((Tab::Apps, vec![(Section::Apps, app_lines(state))]));
@@ -256,7 +256,7 @@ fn gather(state: &State, now: i64, date: Date) -> Day {
         aired,
         lampa: lampa.then(|| lampa_lines(&state.cub, now, date)),
         apps: app_lines(state),
-        crypto: preferences.crypto_in_today(),
+        crypto: state.crypto_in_today(),
     }
 }
 

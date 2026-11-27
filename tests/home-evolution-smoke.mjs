@@ -15,7 +15,17 @@ const p04Only = process.argv.includes('--p04');
 const p05Only = process.argv.includes('--p05');
 const p06Only = process.argv.includes('--p06');
 const p07 = process.argv.includes('--p07');
-const gles = r13Only || p01Only || p02Only || p03Only || p04Only || p05Only || p06Only || p07;
+const acceptanceOnly = process.argv.includes('--t02c-acceptance');
+const gles =
+  r13Only ||
+  p01Only ||
+  p02Only ||
+  p03Only ||
+  p04Only ||
+  p05Only ||
+  p06Only ||
+  p07 ||
+  acceptanceOnly;
 const defaultOutput = p07
   ? path.join(root, '.build/home-stage02-p07')
   : p06Only
@@ -35,7 +45,10 @@ const defaultOutput = p07
                   '.build/home-stage02-r13-aceite',
                   r13Only ? '' : area2Only ? 'area2-selection' : 'regression',
                 );
-const output = path.resolve(process.env.LUMA_HOME_SMOKE_OUTPUT ?? defaultOutput);
+const output = path.resolve(
+  process.env.LUMA_HOME_SMOKE_OUTPUT ??
+    (acceptanceOnly ? path.join(root, '.build/home-t02c-acceptance') : defaultOutput),
+);
 const assets = process.env.LUMA_HOME_SMOKE_ASSETS;
 await fs.mkdir(output, { recursive: true });
 const binary = path.resolve(root, process.env.CARGO_TARGET_DIR ?? 'target', 'debug/luma');
@@ -123,7 +136,9 @@ try {
       '3000',
       ...extra,
     ]);
-  if (p07) {
+  if (acceptanceOnly) {
+    await reviewT02cAcceptance(capture);
+  } else if (p07) {
     const { reviewP07 } = await import('./home-evolution-p07.mjs');
     await reviewP07({ scenario, isolated, output });
   } else if (p06Only) {
@@ -147,6 +162,47 @@ try {
   console.log(`Native Home Evolution: ${scenarios} native rendering/navigation scenarios passed`);
 } finally {
   await fs.rm(scratch, { recursive: true, force: true });
+}
+
+async function reviewT02cAcceptance(capture) {
+  const preferences = {
+    language: 'en',
+    show_cs2: true,
+    show_crypto: true,
+    crypto_coins: ['BTC'],
+    show_shows: false,
+    show_apps: false,
+  };
+  const home = await capture('acceptance-home', 'home', preferences);
+  assert.ok(home.home_preview.controls.some((c) => c.target.EvolutionContent));
+  assert.ok(!home.home_preview.controls.some((c) => c.target === 'TodayCard'));
+
+  const widgets = await capture(
+    'acceptance-settings-edge',
+    'settings,down,down,left,left,side-menu',
+    preferences,
+  );
+  assert.equal(widgets.page, 'Settings');
+  assert.equal(widgets.modal, false);
+  assert.deepEqual(widgets.focus, { Sidebar: 2 });
+  assert.ok(
+    !widgets.home_preview.controls.some(
+      (c) => c.target.Nav !== undefined || c.target === 'MenuInputs',
+    ),
+  );
+  assert.ok(!widgets.home_preview.controls.some((c) => [5, 6].includes(c.target.Widget)));
+  assert.ok(widgets.home_preview.controls.some((c) => c.target.Widget === 1));
+  assert.ok(widgets.home_preview.controls.some((c) => c.target.Widget === 7));
+  assert.ok(widgets.preferences.show_cs2 && widgets.preferences.show_crypto);
+
+  const back = await capture(
+    'acceptance-context-back',
+    'settings,down,down,right,down,down,enter,back',
+    preferences,
+  );
+  assert.equal(back.page, 'Settings');
+  assert.equal(back.subpage, null);
+  assert.deepEqual(back.focus, { Widget: 1 });
 }
 
 async function reviewP06(capture, scenario) {

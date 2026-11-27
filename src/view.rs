@@ -2694,7 +2694,7 @@ fn shows_settings(out: &mut Scene, state: &State, assets: &Assets) {
 
 /// Where a widget sits on Home: in the Today card, or in the middle.
 fn place(language: Language, state: &State, widget: crate::model::Center) -> &'static str {
-    let center = state.preferences.center() == Some(widget);
+    let center = state.widget_center() == Some(widget);
     language.t(if center { "placeCenter" } else { "placeToday" })
 }
 
@@ -7604,11 +7604,15 @@ fn settings_content(out: &mut Scene, state: &State, assets: &Assets) {
                 (7, "lampa", "lampaWidgetAbout", "tv"),
                 (8, "appsWidget", "appsAbout", "grid"),
             ];
-            let rects = list_rects(
-                state,
-                LIST_TOP,
-                &rows.map(|row| (Target::Widget(row.0), true)),
-            );
+            let rows: Vec<_> = rows
+                .into_iter()
+                .filter(|row| state.legacy_widgets_enabled() || !matches!(row.0, 5 | 6))
+                .collect();
+            let targets: Vec<_> = rows
+                .iter()
+                .map(|row| (Target::Widget(row.0), true))
+                .collect();
+            let rects = list_rects(state, LIST_TOP, &targets);
             for ((widget, key, about, icon), rect) in rows.into_iter().zip(rects) {
                 row(
                     out,

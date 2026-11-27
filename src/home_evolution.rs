@@ -1,5 +1,5 @@
 //! Native Evolution Home. Preferences persist; navigation and hover never do.
-//! Enabled only by the explicitly requested desktop preview, never by TV inventory fallback.
+//! Used by the webOS runtime and the desktop Home preview.
 pub use crate::home_motion::MotionProfile;
 use crate::home_motion::{Motion, MotionCurve, MotionPart, MotionSpeed};
 use crate::home_visual::{
@@ -573,8 +573,8 @@ pub struct Home {
     pub suspended: bool,
     /// The SDL loop advances the rotation only after processing pending input.
     pub defer_rotation: bool,
-    /// Desktop fixture may restrict the existing catalog without inventing titles.
-    pub catalog_len: Option<usize>,
+    /// Number of fictional titles for desktop preview. Normal runtime has no Cinema source yet.
+    pub preview_catalog_len: Option<usize>,
 }
 
 pub fn compact_header(prefs: &crate::model::Preferences, now: time::OffsetDateTime) -> String {
@@ -602,6 +602,25 @@ pub fn content(position: i64) -> usize {
 }
 
 impl Home {
+    pub fn preview() -> Self {
+        Self {
+            preview_catalog_len: Some(CONTENTS.len()),
+            ..Self::default()
+        }
+    }
+
+    pub fn for_launch(webos: bool, desktop_preview: bool) -> Option<Self> {
+        if webos {
+            Some(Self::default())
+        } else {
+            desktop_preview.then(Self::preview)
+        }
+    }
+
+    pub fn is_preview(&self) -> bool {
+        self.preview_catalog_len.is_some()
+    }
+
     pub fn wheel_viewport_moving(&self) -> bool {
         self.wheel_viewport.is_some()
     }
@@ -643,9 +662,7 @@ impl Home {
     }
 
     pub fn title_count(&self) -> usize {
-        self.catalog_len
-            .unwrap_or(CONTENTS.len())
-            .min(CONTENTS.len())
+        self.preview_catalog_len.unwrap_or(0).min(CONTENTS.len())
     }
 
     pub fn title_index(&self, position: i64) -> usize {
@@ -1093,17 +1110,40 @@ impl State {
         targets
     }
 
+    /// Legacy widgets remain available to the original desktop harness.
+    pub fn legacy_widgets_enabled(&self) -> bool {
+        self.evolution.is_none()
+    }
+
+    pub fn widget_center(&self) -> Option<crate::model::Center> {
+        use crate::model::Center;
+        if self.legacy_widgets_enabled() {
+            self.preferences.center()
+        } else {
+            self.preferences
+                .center_among(&[Center::Shows, Center::Apps])
+        }
+    }
+
+    pub fn crypto_in_today(&self) -> bool {
+        self.legacy_widgets_enabled() && self.preferences.crypto_in_today()
+    }
+
     pub fn evolution_widget_in_today(&self, widget: crate::model::Center) -> bool {
+        use crate::model::Center;
         let prefs = &self.preferences;
-        prefs.in_today(widget) || (self.evolution.is_some() && prefs.center() == Some(widget))
+        if self.legacy_widgets_enabled() {
+            prefs.in_today(widget)
+        } else {
+            widget != Center::Cs2 && prefs.shown(widget)
+        }
     }
 
     pub fn evolution_has_today(&self) -> bool {
         use crate::model::Center;
-        self.preferences.crypto_in_today()
-            || [Center::Cs2, Center::Shows, Center::Apps]
-                .into_iter()
-                .any(|widget| self.evolution_widget_in_today(widget))
+        [Center::Shows, Center::Apps]
+            .into_iter()
+            .any(|widget| self.evolution_widget_in_today(widget))
     }
 
     pub fn evolution_dock(&self) -> Target {
@@ -1216,7 +1256,7 @@ impl State {
         let home = self.evolution.as_mut().unwrap();
         let previous_count = home.title_count();
         let selected = home.title_index(home.selected);
-        home.catalog_len = Some(count);
+        home.preview_catalog_len = Some(count);
         let count = home.title_count();
         if previous_count == count {
             return;
@@ -1266,7 +1306,7 @@ impl State {
 
     pub(crate) fn evolution_has_cinema(&self) -> bool {
         self.preferences.evolution_home.show_center
-            && self.evolution.as_ref().unwrap().catalog_len != Some(0)
+            && self.evolution.as_ref().unwrap().title_count() > 0
     }
 
     pub(crate) fn evolution_content_index(id: &str) -> Option<usize> {
@@ -1751,7 +1791,7 @@ impl State {
                     Self::evolution_content_index(id).filter(|index| *index < home.title_count());
                 let same_card = matches!(&home.pointer_target,
                     Some(Target::EvolutionContent(target)) if target == id);
-                if !prefs.show_center || home.catalog_len == Some(0) || !same_card {
+                if !prefs.show_center || home.title_count() == 0 || !same_card {
                     home.hover = None;
                 } else if let Some(index) = index {
                     if now.duration_since(*since)
@@ -1952,7 +1992,7 @@ mod tests {
 
     #[test]
     fn carousel_moves_one_item_and_only_reveals_at_edges() {
-        let mut home = Home::default();
+        let mut home = Home::preview();
         home.step(-1);
         assert_eq!(
             (home.selected, home.first, home.title_index(home.selected)),

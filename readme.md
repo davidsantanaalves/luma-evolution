@@ -2,30 +2,19 @@
 
 A remote-first launcher for rooted LG webOS TVs, inspired by Apple TV. Luma Evolution forks
 [Luma+](https://github.com/eluz1ve/lg-luma-plus), which builds on [Luma](https://github.com/ecklf/lg-luma)
-by ecklf. It includes a Today card, Lampa, CS2 and crypto widgets, and a tvOS-style layout.
-
-<p align="center">
-  <img src="docs/slideshow.webp" alt="A tour of Luma Evolution: Home with the Today card, CS2 Scores and a live match, crypto prices, the apps grid, settings with a live preview, and wallpapers">
-</p>
+by ecklf. It includes a favorites Dock, a Today card, Lampa, and a tvOS-style layout.
 
 ## Highlights
 
-- **Today card.** Beside the greeting: live and upcoming CS2 matches, new episodes and coin
-  prices at a glance. OK opens it, with a tab for each widget.
-- **Home your way.** Today with a CS2 or Lampa row in the center, Today alone, or Clean: just
-  the clock, the greeting and your favorites over the wallpaper.
+- **Today card.** Open it to see new episodes and cards from configured apps.
+- **Evolution Home.** An adaptable layout with a favorites Dock, clock, calendar, and available
+  TV inputs. Today gives access to configured widgets. Cinema appears when a catalog is available.
 - **Lampa.** A row of posters: what Lampa viewers are watching now, or your own Continue watching
   from your CUB account (sign in with a QR code). OK opens the series or film right in Lampa,
   through a small Lampa plugin. Outside Russian, series show their English posters from
   [TVmaze](https://www.tvmaze.com).
-- **CS2 Scores.** Counter-Strike 2 matches from Liquipedia with team logos, live scores and
-  results, and a match dialog with maps, rounds and lineups. While a match is played: the round
-  score on Home and in Today, and in the dialog a live scoreboard, round history and game log
-  from HLTV, with the match's Twitch and YouTube streams one OK away.
-- **Crypto prices.** Up to 20 coins, from the usual eight or any Binance coin, running as a ticker
-  in the Today card.
-- **A tvOS-style screen.** A side menu instead of the tab bar, glass panels, a softer focus, and
-  Interface scale for the clock, names and cards.
+- **A tvOS-style screen.** Move the All Apps and Settings shortcuts between the top and Dock,
+  with glass panels, motion profiles, and controls for the clock, names and cards.
 - **Settings with a live preview** of Home that follows every change.
 - **Wallpapers.** Apple TV's aerial stills, changing every fifteen minutes, and dynamic
   wallpapers that follow the sun at your weather location.
